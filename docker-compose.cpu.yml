@@ -1,0 +1,47 @@
+services:
+  # ============================================================================
+  # 1. FastAPI Deep Learning Backend Service (CPU Mode)
+  # ============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: nephroai_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATA_ROOT=/data
+      - MODEL_CHECKPOINT=/app/notebookV3/checkpoints/best_unet_kits23.pth
+    volumes:
+      # Mount KiTS23 dataset into container (Read-Only)
+      - D:\archive:/data:ro
+      # Mount trained weights and reports
+      - ./notebookV3/checkpoints:/app/notebookV3/checkpoints:ro
+      - ./notebookV3/reports:/app/notebookV3/reports:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================================
+  # 2. React / Vite Frontend UI Service (Served via High-Performance Nginx)
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nephroai_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  default:
+    name: nephroai_network

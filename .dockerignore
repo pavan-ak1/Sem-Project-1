@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+venv/
+archive_legacy/
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.ipynb_checkpoints/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+figures/
+reports/
+prompts.txt
+workflow.md

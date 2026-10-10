@@ -219,3 +219,11 @@ __marimo__/
 
 
 prompts.txt
+
+dataset/
+
+# Project Archives & Large Model Checkpoints
+archive_legacy/
+*.pth
+uploaded_cases/
+

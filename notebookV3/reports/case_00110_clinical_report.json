@@ -1,0 +1,41 @@
+{
+    "header": {
+        "title": "AI-ASSISTED QUANTITATIVE RENAL CT REPORT",
+        "system": "Agentic AI-Based Kidney Image Analysis and Monitoring System",
+        "version": "Phase 4 Production Engine (Residual U-Net)",
+        "timestamp": "2026-10-09 00:29:42",
+        "case_id": "case_00110",
+        "disclaimer": "AI-Generated Decision-Support Tool. Requires verification by a board-certified radiologist/urologist."
+    },
+    "quantitative_volumetrics_cm3": {
+        "right_kidney_volume": 153.03,
+        "left_kidney_volume": 43.37,
+        "total_parenchyma_volume": 196.4,
+        "tumor_volume": 13.95,
+        "cyst_volume": 3.86,
+        "tumor_laterality": "Left Kidney"
+    },
+    "koukoutegos_2024_pca_axes_cm": {
+        "longitudinal_length": 9.47,
+        "transverse_width": 6.3,
+        "antero_posterior_thickness": 4.65,
+        "ellipsoid_volume_approximation": 145.17,
+        "ellipsoid_error_percent": 33.54
+    },
+    "ajcc_tnm_staging": {
+        "max_tumor_diameter_cm": 3.72,
+        "caliper_dimensions": {
+            "cranio_caudal": 1.8,
+            "antero_posterior": 3.12,
+            "medio_lateral": 3.67
+        },
+        "clinical_t_stage": "cT1a",
+        "surgical_candidacy": "Strong Candidate for Nephron-Sparing Surgery (Partial Nephrectomy)",
+        "post_op_partial_nephrectomy_reserve_cm3": 182.45,
+        "post_op_radical_nephrectomy_reserve_cm3": 153.03,
+        "clinical_recommendation": "Tumor diameter (3.72 cm) <= 4.0 cm. Partial Nephrectomy recommended to preserve renal function."
+    },
+    "model_performance": {
+        "patient_dice_similarity": 0.949
+    }
+}

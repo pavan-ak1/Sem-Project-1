@@ -1,0 +1,66 @@
+# ==============================================================================
+# 1. BASELINE TRAINING (train.py) & INTERACTIVE V3 NOTEBOOKS
+# ==============================================================================
+# Train baseline model from terminal:
+# python train.py --epochs 18 --batch-size 16 --num-workers 4
+
+# Interactive Notebooks (V3 Pipeline):
+# Open and run notebooks under `notebookV3/` directly in Jupyter / VS Code / Antigravity IDE:
+#   - notebookV3/01_dataset_analysis.ipynb
+#   - notebookV3/02_preprocessing_and_augmentation.ipynb
+#   - notebookV3/03_model_architecture_and_training.ipynb
+#   - notebookV3/04_volumetric_analysis_and_clinical_metrics.ipynb
+
+
+# ==============================================================================
+# 2. MODEL EVALUATION & TESTING (With Optional TTA)
+# ==============================================================================
+# Evaluate Best V3 Model on Test Split:
+.\venv\Scripts\python.exe evaluate.py --checkpoint notebookV3/checkpoints/best_unet_kits23.pth --split test --batch-size 16 --tta
+
+# Standard V3 Test Split Evaluation:
+.\venv\Scripts\python.exe evaluate.py --checkpoint notebookV3/checkpoints/best_unet_kits23.pth --split test --batch-size 16
+
+# Test Split with Test-Time Augmentation (TTA for +0.5% to +1.5% Dice boost):
+.\venv\Scripts\python.exe evaluate.py --split test --batch-size 16 --tta
+
+# Quick evaluation on 100 test batches with 10 visual overlays:
+.\venv\Scripts\python.exe evaluate.py --split test --max-batches 100 --num-visualizations 10 --tta
+
+# Validation Split Evaluation:
+.\venv\Scripts\python.exe evaluate.py --split val --tta
+
+# Specific Patient Case Evaluations:
+.\venv\Scripts\python.exe evaluate.py --patient-case case_00110 --num-visualizations 10 --tta
+.\venv\Scripts\python.exe evaluate.py --patient-case case_00473 --num-visualizations 10 --tta
+.\venv\Scripts\python.exe evaluate.py --patient-case case_00427 --num-visualizations 10 --tta
+
+
+# ==============================================================================
+# 3. FULL-STACK WEB APPLICATION & CLINICAL INTERFACE (MENTOR DEMO)
+# ==============================================================================
+# Option A — Single-Command Full-Stack App (FastAPI serving React Dashboard):
+# .\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+# -> Open in browser: http://localhost:8000
+
+# Option B — Decoupled Frontend/Backend Dev Server:
+# Terminal 1 (FastAPI Backend):
+# .\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
+# Terminal 2 (Vite React Frontend):
+# npm.cmd --prefix frontend run dev
+# -> Open in browser: http://localhost:5173
+
+# Option C — Containerized Multi-Service Deployment (Docker Compose):
+# 1. GPU Mode (Uses NVIDIA GPU whenever available):
+#    docker compose up --build -d
+#
+# 2. CPU Fallback Mode (For systems without NVIDIA GPU):
+#    docker compose -f docker-compose.cpu.yml up --build -d
+#
+# -> Open in browser: http://localhost:3000 (Frontend) or http://localhost:8000/docs (Backend Swagger API)
+# Stop containers:
+# docker compose down
+
+
+
+

@@ -1,0 +1,24 @@
+# Core Deep Learning & Acceleration
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+torchaudio==2.11.0+cu128
+
+# Image Processing & Computer Vision
+pillow>=10.0.0
+numpy>=1.26.0
+scipy>=1.18.0
+
+# Data Analysis & Metadata Handling
+pandas>=2.0.0
+
+# Visualization & Plotting
+matplotlib>=3.8.0
+
+# Progress Tracking & Utilities
+tqdm>=4.65.0
+
+# Web Application & Clinical API Backend
+fastapi>=0.110.0
+uvicorn>=0.28.0
+python-multipart>=0.0.9
+
