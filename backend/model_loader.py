@@ -1,6 +1,19 @@
 import os
+import sys
+import platform
+import pathlib
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
+
+# Cross-platform compatibility fix:
+# Checkpoints saved on Windows contain `pathlib.WindowsPath` in pickled metadata
+# (e.g. ckpt['args']['data_root']), which raises:
+# `NotImplementedError: cannot instantiate 'WindowsPath' on your system`
+# when deserialized on Linux/Docker (and vice-versa for PosixPath on Windows).
+if platform.system() == "Windows":
+    pathlib.PosixPath = pathlib.WindowsPath
+else:
+    pathlib.WindowsPath = pathlib.PosixPath
 
 import torch
 import torch.nn as nn
@@ -102,6 +115,11 @@ def get_device() -> torch.device:
         else:
             print("[DEVICE] No CUDA GPU detected. Running in standard CPU mode.")
             _device = torch.device("cpu")
+
+        if _device.type == "cpu":
+            # Prevent OpenMP thread oversubscription on CPU
+            cpu_count = os.cpu_count() or 4
+            torch.set_num_threads(min(cpu_count, 8))
     return _device
 
 

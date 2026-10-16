@@ -33,6 +33,7 @@ class SlicePredictionResponse(BaseModel):
     cyst_area_cm2: float
     pixel_counts: Dict[str, int]
     inference_time_ms: float
+    tta_enabled: Optional[bool] = True
 
 class Patient3DMetrics(BaseModel):
     case_id: str
@@ -52,6 +53,7 @@ class Patient3DMetrics(BaseModel):
     surgical_recommendation: str
     inference_time_sec: float
     gt_comparison: Optional[Dict[str, Any]] = None
+    tta_enabled: Optional[bool] = True
 
 class ClinicalReportResponse(BaseModel):
     case_id: str
@@ -96,6 +98,7 @@ class CaseUploadResponse(BaseModel):
     tnm_stage: str
     surgical_recommendation: str
     inference_time_sec: float
+    tta_enabled: Optional[bool] = True
     slices: List[CaseUploadSliceItem]
     key_preview_slices: Optional[List[CaseUploadPreviewSlice]] = []
     report_markdown: str

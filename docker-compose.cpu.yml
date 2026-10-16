@@ -20,6 +20,8 @@ services:
       # Mount trained weights and reports
       - ./notebookV3/checkpoints:/app/notebookV3/checkpoints:ro
       - ./notebookV3/reports:/app/notebookV3/reports:ro
+      # Mount backend code
+      - ./backend:/app/backend
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 20s

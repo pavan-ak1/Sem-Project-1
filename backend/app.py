@@ -1,6 +1,15 @@
 import os
+import sys
+import platform
+import pathlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+# Cross-platform compatibility fix for checkpoints serialized on Windows
+if platform.system() == "Windows":
+    pathlib.PosixPath = pathlib.WindowsPath
+else:
+    pathlib.WindowsPath = pathlib.PosixPath
 
 import pandas as pd
 from PIL import Image
@@ -10,6 +19,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import json
+import anyio
 
 from backend.schemas import (
     HealthResponse,
@@ -178,7 +188,7 @@ async def get_case_slices(case_id: str):
 
 
 @app.get("/api/case/{case_id}/slice/{slice_idx}")
-async def get_patient_slice_detail(case_id: str, slice_idx: int):
+async def get_patient_slice_detail(case_id: str, slice_idx: int, tta: bool = False):
     """Fetches a specific patient slice with ground truth mask and live AI inference."""
     # Check if case was uploaded
     if (UPLOADED_CASES_DIR / case_id).exists():
@@ -223,9 +233,10 @@ async def get_patient_slice_detail(case_id: str, slice_idx: int):
         gt_overlay_b64 = image_to_base64_url(gt_overlay_img)
         gt_mask_b64 = image_to_base64_url(Image.fromarray(gt_arr * 80).convert("L"))
 
-    # Single-slice inference
+    # Single-slice inference (supports optional 4-Fold TTA)
     with open(img_path, "rb") as fp:
-        infer_res = run_single_slice_inference(fp.read())
+        raw_bytes = fp.read()
+    infer_res = await anyio.to_thread.run_sync(run_single_slice_inference, raw_bytes, tta)
 
     infer_res["ground_truth_overlay"] = gt_overlay_b64
     infer_res["ground_truth_mask"] = gt_mask_b64
@@ -237,11 +248,14 @@ async def get_patient_slice_detail(case_id: str, slice_idx: int):
 
 
 @app.post("/api/predict/slice", response_model=SlicePredictionResponse)
-async def predict_custom_slice(file: UploadFile = File(...)):
-    """Receives an uploaded custom CT slice file and returns AI segmentation & overlay."""
+async def predict_custom_slice(
+    file: UploadFile = File(...),
+    tta: Optional[bool] = Form(None)
+):
+    """Receives an uploaded custom CT slice file and returns AI segmentation (adaptive TTA)."""
     try:
         contents = await file.read()
-        res = run_single_slice_inference(contents)
+        res = await anyio.to_thread.run_sync(run_single_slice_inference, contents, tta)
         return SlicePredictionResponse(**res)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
@@ -250,12 +264,13 @@ async def predict_custom_slice(file: UploadFile = File(...)):
 @app.post("/api/predict/case-upload", response_model=CaseUploadResponse)
 async def predict_uploaded_case(
     files: List[UploadFile] = File(...),
-    case_id: Optional[str] = Form(None)
+    case_id: Optional[str] = Form(None),
+    tta: Optional[bool] = Form(None)
 ):
     """
     Receives an uploaded patient case folder (or multiple slice files)
     and executes complete 3D volumetric analysis, morphological CCA filtering,
-    PCA caliper morphometry, and AJCC TNM clinical staging.
+    PCA caliper morphometry, and AJCC TNM clinical staging (adaptive TTA).
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
@@ -266,7 +281,7 @@ async def predict_uploaded_case(
         file_payloads.append((f.filename, data))
 
     try:
-        results = run_uploaded_case_pipeline(file_payloads, case_name=case_id)
+        results = await anyio.to_thread.run_sync(run_uploaded_case_pipeline, file_payloads, case_id, tta)
         return CaseUploadResponse(**results)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Case upload processing error: {str(e)}")
@@ -283,9 +298,24 @@ async def get_uploaded_slice(case_id: str, slice_idx: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_case_3d_cache: Dict[str, Any] = {}
+
+
+@app.get("/api/case/{case_id}/metrics")
+async def get_case_metrics(case_id: str):
+    """Retrieves cached 3D metrics if available, or returns 404."""
+    upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
+    if upload_meta.exists():
+        with open(upload_meta, "r", encoding="utf-8") as f:
+            return JSONResponse(content=json.load(f))
+    if case_id in _case_3d_cache:
+        return JSONResponse(content=_case_3d_cache[case_id])
+    return JSONResponse(content={"status": "not_computed", "case_id": case_id}, status_code=404)
+
+
 @app.post("/api/predict/case/{case_id}")
-async def predict_case_3d(case_id: str):
-    """Executes full 3D patient volume reconstruction, morphometry, and TNM staging."""
+async def predict_case_3d(case_id: str, tta: Optional[bool] = None):
+    """Executes full 3D patient volume reconstruction, morphometry, and TNM staging (adaptive TTA)."""
     upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
     if upload_meta.exists():
         with open(upload_meta, "r", encoding="utf-8") as f:
@@ -310,8 +340,12 @@ async def predict_case_3d(case_id: str):
             "report_markdown": m["report_markdown"]
         })
 
+    if case_id in _case_3d_cache:
+        return JSONResponse(content=_case_3d_cache[case_id])
+
     try:
-        metrics = run_patient_case_inference(case_id)
+        metrics = await anyio.to_thread.run_sync(run_patient_case_inference, case_id, tta)
+        _case_3d_cache[case_id] = metrics
         return JSONResponse(content=metrics)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"3D Case inference error: {str(e)}")

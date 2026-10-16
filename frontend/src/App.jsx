@@ -98,8 +98,20 @@ export default function App() {
       })
       .catch(err => console.error("Error fetching slices list:", err));
 
-    // Automatically trigger or fetch 3D case analytics
-    trigger3DReconstruction(selectedCaseId);
+    // Check if 3D metrics are already computed or cached
+    fetch(`/api/case/${selectedCaseId}/metrics`)
+      .then(res => {
+        if (res.ok) return res.json();
+        return null;
+      })
+      .then(cached => {
+        if (cached && cached.tnm_stage) {
+          setMetrics3D(cached);
+        } else {
+          setMetrics3D(null);
+        }
+      })
+      .catch(() => setMetrics3D(null));
   }, [selectedCaseId]);
 
   // 3. Fetch specific slice detail
@@ -278,8 +290,9 @@ export default function App() {
       if (match) detectedName = match[0].toLowerCase();
     }
 
+    const sliceWord = imageFiles.length === 1 ? 'slice' : 'slices';
     setIsUploading(true);
-    setUploadProgressText(`Uploading ${imageFiles.length} CT slices & executing 3D Residual U-Net pipeline...`);
+    setUploadProgressText(`Uploading ${imageFiles.length} CT ${sliceWord} & executing Residual U-Net AI pipeline...`);
 
     const formData = new FormData();
     if (detectedName) formData.append('case_id', detectedName);
@@ -289,8 +302,11 @@ export default function App() {
       method: 'POST',
       body: formData
     })
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      .then(async res => {
+        if (!res.ok) {
+          const errDetail = await res.text();
+          throw new Error(`HTTP ${res.status}: ${errDetail}`);
+        }
         return res.json();
       })
       .then(data => {
@@ -336,7 +352,13 @@ export default function App() {
       method: 'POST',
       body: formData
     })
-      .then(res => res.json())
+      .then(async res => {
+        if (!res.ok) {
+          const errDetail = await res.text();
+          throw new Error(`HTTP ${res.status}: ${errDetail}`);
+        }
+        return res.json();
+      })
       .then(data => {
         setSingleSliceResult(data);
         setIsUploading(false);
@@ -344,6 +366,7 @@ export default function App() {
       })
       .catch(err => {
         console.error("Single slice upload error:", err);
+        alert(`Single slice upload failed: ${err.message}`);
         setIsUploading(false);
         setUploadProgressText('');
       });
@@ -701,7 +724,7 @@ export default function App() {
                   disabled={isComputing3D}
                 >
                   <RotateCw size={13} className={isComputing3D ? 'animate-spin' : ''} />
-                  {isComputing3D ? "Reconstructing..." : "Recompute 3D"}
+                  {isComputing3D ? "Reconstructing..." : (metrics3D ? "Recompute 3D" : "Compute 3D")}
                 </button>
               </div>
 

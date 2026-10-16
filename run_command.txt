@@ -1,8 +1,8 @@
 # ==============================================================================
 # 1. BASELINE TRAINING (train.py) & INTERACTIVE V3 NOTEBOOKS
 # ==============================================================================
-# Train baseline model from terminal:
-# python train.py --epochs 18 --batch-size 16 --num-workers 4
+# Retrain with Class-Weighted Focal + Asymmetric Tversky Loss (Fine-tuning best_unet_kits23.pth):
+.\venv\Scripts\python.exe train_tversky.py --epochs 10 --lr 1e-4 --batch-size 8
 
 # Interactive Notebooks (V3 Pipeline):
 # Open and run notebooks under `notebookV3/` directly in Jupyter / VS Code / Antigravity IDE:
@@ -34,6 +34,11 @@
 .\venv\Scripts\python.exe evaluate.py --patient-case case_00110 --num-visualizations 10 --tta
 .\venv\Scripts\python.exe evaluate.py --patient-case case_00473 --num-visualizations 10 --tta
 .\venv\Scripts\python.exe evaluate.py --patient-case case_00427 --num-visualizations 10 --tta
+.\venv\Scripts\python.exe evaluate.py --patient-case case_00543 --post-process --num-visualizations 10 --tta
+
+# Calibrated Thresholding & Post-Processing (Recovers Missed Tumors & Resolves Cyst Confusion):
+.\venv\Scripts\python.exe evaluate.py --split test --batch-size 16 --tta --post-process
+.\venv\Scripts\python.exe evaluate.py --split test --calibrated --tumor-thresh 0.35 --cyst-thresh 0.28 --anatomical-containment --tta
 
 
 # ==============================================================================

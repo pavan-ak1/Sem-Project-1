@@ -41,7 +41,22 @@ PALETTE = {
 
 
 def standardize_dims(image: np.ndarray, target_h: int = 512, target_w: int = 512) -> np.ndarray:
-    """Center-crops or constant-pads image to (512, 512)."""
+    """Center-crops or constant-pads image to (512, 512). Handles 2D (H, W) and multi-channel arrays."""
+    # Convert multi-channel (RGB, RGBA) to 2D single-channel grayscale if needed
+    if image.ndim == 3:
+        if image.shape[2] == 3:
+            image = 0.2989 * image[:, :, 0] + 0.5870 * image[:, :, 1] + 0.1140 * image[:, :, 2]
+        elif image.shape[2] == 4:
+            image = 0.2989 * image[:, :, 0] + 0.5870 * image[:, :, 1] + 0.1140 * image[:, :, 2]
+        elif image.shape[2] == 1:
+            image = image[:, :, 0]
+        else:
+            image = np.mean(image, axis=2)
+    elif image.ndim > 3:
+        image = np.squeeze(image)
+        if image.ndim > 2:
+            image = image[0]
+
     h, w = image.shape[:2]
     if h == target_h and w == target_w:
         return image
@@ -91,10 +106,16 @@ def create_overlay(image_norm: np.ndarray, mask: np.ndarray, alpha: float = 0.5)
 
 
 def clean_segmentation_volume(raw_volume: np.ndarray) -> np.ndarray:
-    """3D Connected Component Analysis morphological cleanup."""
+    """3D Connected Component Analysis morphological cleanup with exophytic tumor preservation."""
     clean = np.zeros_like(raw_volume)
+    is_single_slice = (raw_volume.shape[0] == 1)
 
     # 1. Kidney: retain top 2 largest components (left and right kidneys)
+    # Adapt minimum voxel thresholds if processing a single 2D slice vs full 3D series
+    min_k_vox = 20 if is_single_slice else 100
+    min_t_vox = 10 if is_single_slice else 25
+    min_c_vox = 5 if is_single_slice else 15
+
     kidney_voxels = (raw_volume == 1)
     if np.any(kidney_voxels):
         labeled_k, n_k = label(kidney_voxels)
@@ -102,44 +123,92 @@ def clean_segmentation_volume(raw_volume: np.ndarray) -> np.ndarray:
             sizes = [np.sum(labeled_k == i) for i in range(1, n_k + 1)]
             top_k_indices = np.argsort(sizes)[::-1][:2]
             for idx in top_k_indices:
-                if sizes[idx] >= 100:
+                if sizes[idx] >= min_k_vox:
                     clean[labeled_k == (idx + 1)] = 1
 
-    # 2. Anatomical containment: tumors and cysts must be near kidney parenchyma
+    # 2. Anatomical containment:
+    # Large renal cell carcinomas (RCC) can grow up to 8-10 cm outward (exophytic growth into retroperitoneum).
+    # We use a wide envelope (25 iterations ~20 mm) for tumor to eliminate distant bowel/liver noise
+    # without truncating large cancer masses, and a tighter envelope for benign intra-renal cysts.
     if np.any(clean == 1):
-        kidney_envelope = binary_dilation(clean == 1, iterations=6)
+        kidney_envelope_wide = binary_dilation(clean == 1, iterations=25)
+        kidney_envelope_tight = binary_dilation(clean == 1, iterations=15)
     else:
-        kidney_envelope = np.ones_like(raw_volume, dtype=bool)
+        kidney_envelope_wide = np.ones_like(raw_volume, dtype=bool)
+        kidney_envelope_tight = np.ones_like(raw_volume, dtype=bool)
 
-    # 3. Tumor
-    tumor_voxels = (raw_volume == 2) & kidney_envelope
+    # 3. Tumor: filtered by wide anatomical boundary and minimum cluster threshold
+    tumor_voxels = (raw_volume == 2) & kidney_envelope_wide
     if np.any(tumor_voxels):
         labeled_t, n_t = label(tumor_voxels)
         if n_t > 0:
             sizes_t = [np.sum(labeled_t == i) for i in range(1, n_t + 1)]
             for i, sz in enumerate(sizes_t, 1):
-                if sz >= 30:
+                if sz >= min_t_vox:
                     clean[labeled_t == i] = 2
 
-    # 4. Cyst
-    cyst_voxels = (raw_volume == 3) & kidney_envelope
+    # 4. Cyst: benign fluid-attenuated cysts remain intra-parenchymal or subcapsular
+    cyst_voxels = (raw_volume == 3) & kidney_envelope_tight
     if np.any(cyst_voxels):
         labeled_c, n_c = label(cyst_voxels)
         if n_c > 0:
             sizes_c = [np.sum(labeled_c == i) for i in range(1, n_c + 1)]
             for i, sz in enumerate(sizes_c, 1):
-                if sz >= 20:
+                if sz >= min_c_vox:
                     clean[labeled_c == i] = 3
 
     return clean
 
 
-def run_single_slice_inference(image_bytes: bytes) -> Dict[str, Any]:
-    """Inference on a single uploaded slice with 16-bit/8-bit auto-detection."""
+def predict_tensor(
+    model: torch.nn.Module,
+    tensor: torch.Tensor,
+    device: torch.device,
+    use_tta: bool = False
+) -> np.ndarray:
+    """
+    Executes model forward pass with optional 4-Fold Test-Time Augmentation (TTA).
+    tensor: (B, 1, 512, 512) float tensor in [0.0, 1.0].
+    Returns: (B, 512, 512) uint8 numpy array of class indices {0, 1, 2, 3}.
+    """
+    with torch.inference_mode():
+        if not use_tta:
+            if device.type == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    logits = model(tensor)
+            else:
+                logits = model(tensor)
+            preds = torch.argmax(logits, dim=1)
+        else:
+            # 4-Fold Multi-Axis TTA: original, horizontal flip, vertical flip, and diagonal flip
+            if device.type == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    p1 = F.softmax(model(tensor), dim=1)
+                    p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
+                    p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
+                    p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+            else:
+                p1 = F.softmax(model(tensor), dim=1)
+                p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
+                p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
+                p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+
+            probs_avg = 0.25 * (p1 + p2 + p3 + p4)
+            preds = torch.argmax(probs_avg, dim=1)
+
+    return preds.cpu().numpy().astype(np.uint8)
+
+
+def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = None) -> Dict[str, Any]:
+    """Inference on a single uploaded slice with 16-bit/8-bit auto-detection and adaptive TTA."""
     model, device = load_model()
+    if use_tta is None:
+        use_tta = (device.type == "cuda")
     t_start = time.perf_counter()
 
     pil_raw = Image.open(io.BytesIO(image_bytes))
+    if pil_raw.mode in ("RGB", "RGBA", "P"):
+        pil_raw = pil_raw.convert("L")
     img_arr = np.array(pil_raw, dtype=np.float32)
 
     # Standardization & Normalization
@@ -152,16 +221,7 @@ def run_single_slice_inference(image_bytes: bytes) -> Dict[str, Any]:
         norm_img = (img_std - img_std.min()) / max(1e-4, img_std.max() - img_std.min())
 
     tensor_in = torch.from_numpy(norm_img).unsqueeze(0).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        if device.type == "cuda":
-            with torch.amp.autocast(device_type="cuda"):
-                logits = model(tensor_in)
-        else:
-            logits = model(tensor_in)
-        probs = F.softmax(logits, dim=1)
-        pred_mask = torch.argmax(probs, dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
-
+    pred_mask = predict_tensor(model, tensor_in, device, use_tta=use_tta)[0]
 
     t_elapsed = (time.perf_counter() - t_start) * 1000.0
 
@@ -192,13 +252,16 @@ def run_single_slice_inference(image_bytes: bytes) -> Dict[str, Any]:
             "cyst": px_c,
             "background": int(np.sum(pred_mask == 0))
         },
-        "inference_time_ms": round(t_elapsed, 1)
+        "inference_time_ms": round(t_elapsed, 1),
+        "tta_enabled": use_tta
     }
 
 
-def run_patient_case_inference(case_id: str) -> Dict[str, Any]:
-    """Runs 3D volume reconstruction and clinical decision support for a patient case."""
+def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> Dict[str, Any]:
+    """Runs 3D volume reconstruction and clinical decision support for a patient case with adaptive TTA."""
     model, device = load_model()
+    if use_tta is None:
+        use_tta = (device.type == "cuda")
     t_start = time.perf_counter()
 
     if not CSV_PATH.exists():
@@ -236,22 +299,16 @@ def run_patient_case_inference(case_id: str) -> Dict[str, Any]:
     if len(slices_list) == 0:
         raise ValueError(f"No image files found for case {case_id}")
 
-    # Batch model forward pass
+    # Batch model forward pass with adaptive TTA and cache-optimized batch size
     vol_3d_in = np.stack(slices_list, axis=0)  # (D, 512, 512)
     preds_3d = []
 
-    batch_size = 16
-    with torch.no_grad():
+    batch_size = 16 if device.type == "cuda" else 4
+    with torch.inference_mode():
         for i in range(0, len(vol_3d_in), batch_size):
             batch_np = vol_3d_in[i:i + batch_size]
             b_tensor = torch.from_numpy(batch_np).unsqueeze(1).to(device)
-            if device.type == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
-                    logits = model(b_tensor)
-            else:
-                logits = model(b_tensor)
-            p_batch = torch.argmax(logits, dim=1).cpu().numpy().astype(np.uint8)
-
+            p_batch = predict_tensor(model, b_tensor, device, use_tta=use_tta)
             preds_3d.append(p_batch)
 
     raw_preds_3d = np.concatenate(preds_3d, axis=0)
@@ -310,7 +367,8 @@ def run_patient_case_inference(case_id: str) -> Dict[str, Any]:
         "surgical_recommendation": staging["surgical_recommendation"],
         "inference_time_sec": round(t_elapsed, 2),
         "gt_comparison": gt_comparison,
-        "report_markdown": report_md
+        "report_markdown": report_md,
+        "tta_enabled": use_tta
     }
 
 
@@ -319,13 +377,19 @@ def natural_sort_key(s: str):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 
-def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Optional[str] = None) -> Dict[str, Any]:
+def run_uploaded_case_pipeline(
+    files: List[Tuple[str, bytes]],
+    case_name: Optional[str] = None,
+    use_tta: Optional[bool] = None
+) -> Dict[str, Any]:
     """
     Executes full 3D volumetric analysis, CCA morphological cleaning,
     PCA caliper morphometry, AJCC TNM clinical staging, and clinical report
-    generation for an uploaded patient case folder or multi-slice series.
+    generation for an uploaded patient case folder or multi-slice series with adaptive TTA.
     """
     model, device = load_model()
+    if use_tta is None:
+        use_tta = (device.type == "cuda")
     t_start = time.perf_counter()
 
     valid_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".dcm"}
@@ -359,6 +423,8 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
     for fname, raw_bytes in sorted_files:
         try:
             p_raw = Image.open(io.BytesIO(raw_bytes))
+            if p_raw.mode in ("RGB", "RGBA", "P"):
+                p_raw = p_raw.convert("L")
             arr = np.array(p_raw, dtype=np.float32)
             std_arr = standardize_dims(arr, 512, 512)
 
@@ -379,21 +445,16 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
     if len(slices_list) == 0:
         raise ValueError("No valid image files found in the uploaded case folder.")
 
-    # Batch model forward pass
+    # Batch model forward pass with adaptive TTA and cache-optimized batch size
     vol_3d_in = np.stack(slices_list, axis=0)  # (D, 512, 512)
     preds_3d = []
-    batch_size = 16
+    batch_size = 16 if device.type == "cuda" else 4
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(0, len(vol_3d_in), batch_size):
             batch_np = vol_3d_in[i:i + batch_size]
             b_tensor = torch.from_numpy(batch_np).unsqueeze(1).to(device)
-            if device.type == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
-                    logits = model(b_tensor)
-            else:
-                logits = model(b_tensor)
-            p_batch = torch.argmax(logits, dim=1).cpu().numpy().astype(np.uint8)
+            p_batch = predict_tensor(model, b_tensor, device, use_tta=use_tta)
             preds_3d.append(p_batch)
 
     raw_preds_3d = np.concatenate(preds_3d, axis=0)
@@ -452,7 +513,7 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
     elif kidney_slice_indices:
         best_preview_slice = max(kidney_slice_indices, key=lambda x: x[1])[0]
     else:
-        best_preview_slice = len(slices_list) // 2
+        best_preview_slice = max(0, min(len(slices_list) - 1, len(slices_list) // 2))
 
     # Generate key preview slices with base64 for instant display
     candidate_preview_indices = []
@@ -460,9 +521,12 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
         candidate_preview_indices.append(best_preview_slice)
     if kidney_slice_indices and kidney_slice_indices[0][0] not in candidate_preview_indices:
         candidate_preview_indices.append(kidney_slice_indices[0][0])
-    mid_idx = len(slices_list) // 2
+    mid_idx = max(0, min(len(slices_list) - 1, len(slices_list) // 2))
     if mid_idx not in candidate_preview_indices:
         candidate_preview_indices.append(mid_idx)
+
+    if not candidate_preview_indices:
+        candidate_preview_indices.append(0)
 
     candidate_preview_indices = sorted(list(set(candidate_preview_indices)))[:4]
     key_previews = []
@@ -493,6 +557,7 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
         "staging": staging,
         "inference_time_sec": round(t_elapsed, 2),
         "report_markdown": report_md,
+        "tta_enabled": use_tta,
         "slices": slices_summary
     }
     with open(case_store_dir / "meta.json", "w", encoding="utf-8") as f:
@@ -516,6 +581,7 @@ def run_uploaded_case_pipeline(files: List[Tuple[str, bytes]], case_name: Option
         "tnm_stage": staging["tnm_t_stage"],
         "surgical_recommendation": staging["surgical_recommendation"],
         "inference_time_sec": round(t_elapsed, 2),
+        "tta_enabled": use_tta,
         "slices": slices_summary,
         "key_preview_slices": key_previews,
         "report_markdown": report_md

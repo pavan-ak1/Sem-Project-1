@@ -88,6 +88,9 @@ def compute_pca_renal_axes(
     length_cm    = float(ranges_cm[0])
     width_cm     = float(ranges_cm[1])
     thickness_cm = float(ranges_cm[2])
+    # For single-slice or flat 2D inputs, ensure thickness reflects nominal slice spacing
+    if thickness_cm < 0.01:
+        thickness_cm = round(dz / 10.0, 2)
 
     v_true_3d   = float(len(coords) * voxel_vol_cm3)
     v_ellipsoid = float((math.pi / 6.0) * length_cm * width_cm * thickness_cm)
@@ -124,15 +127,20 @@ def compute_tnm_surgical_staging(
     dz, dy, dx = voxel_spacing
     phys_coords = tumor_coords.astype(np.float64) * np.array([dz, dy, dx])
 
-    # Downsample if too large for pairwise distance
-    if len(phys_coords) > 2000:
-        idx = np.random.choice(len(phys_coords), size=2000, replace=False)
-        sample = phys_coords[idx]
+    if len(phys_coords) == 1:
+        d_max_mm = float(max(dx, dy))
+        d_max_cm = round(d_max_mm / 10.0, 2)
     else:
-        sample = phys_coords
+        # Downsample if too large for pairwise distance
+        if len(phys_coords) > 2000:
+            idx = np.random.choice(len(phys_coords), size=2000, replace=False)
+            sample = phys_coords[idx]
+        else:
+            sample = phys_coords
 
-    d_max_mm = float(np.max(pdist(sample)))
-    d_max_cm = round(d_max_mm / 10.0, 2)
+        d_dist = pdist(sample)
+        d_max_mm = float(np.max(d_dist)) if len(d_dist) > 0 else float(max(dx, dy))
+        d_max_cm = round(d_max_mm / 10.0, 2)
 
     # AJCC 8th Edition TNM Staging criteria
     if d_max_cm <= 4.0:
