@@ -36,6 +36,10 @@ export default function App() {
   const [totalSlices, setTotalSlices] = useState(34);
   const [sliceData, setSliceData] = useState(null);
   const [loadingSlice, setLoadingSlice] = useState(false);
+  const [caseSlices, setCaseSlices] = useState([]);
+  const [loadingCase, setLoadingCase] = useState(false);
+  const caseCacheRef = useRef({});
+  const uploadedSliceCacheRef = useRef({});
   const [viewMode, setViewMode] = useState('ai_overlay'); // 'ai_overlay' | 'gt_overlay' | 'split' | 'pure_ct'
   const [opacity, setOpacity] = useState(0.65);
   const [visibleLayers, setVisibleLayers] = useState({ kidney: true, tumor: true, cyst: true });
@@ -55,6 +59,7 @@ export default function App() {
   const [singleSliceResult, setSingleSliceResult] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
+  const [uploadPreviewUrl, setUploadPreviewUrl] = useState(null);
   const [dragActive, setDragActive] = useState(false);
 
   // Modal State
@@ -85,58 +90,119 @@ export default function App() {
       .catch(err => console.error("Fetch cases error:", err));
   }, []);
 
-  // 2. Fetch Case Slices list when selectedCaseId changes
+  // 2. Fetch Entire Case Bundle at once (Batch-computed slices + 3D metrics)
   useEffect(() => {
     if (!selectedCaseId) return;
-    fetch(`/api/case/${selectedCaseId}/slices`)
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.slices) {
-          setTotalSlices(data.total_slices);
-          setSliceIndex(Math.floor(data.total_slices / 2));
-        }
-      })
-      .catch(err => console.error("Error fetching slices list:", err));
 
-    // Check if 3D metrics are already computed or cached
-    fetch(`/api/case/${selectedCaseId}/metrics`)
-      .then(res => {
-        if (res.ok) return res.json();
-        return null;
-      })
-      .then(cached => {
-        if (cached && cached.tnm_stage) {
-          setMetrics3D(cached);
-        } else {
-          setMetrics3D(null);
-        }
-      })
-      .catch(() => setMetrics3D(null));
-  }, [selectedCaseId]);
+    // Check client-side memory cache first for immediate zero-latency load
+    if (caseCacheRef.current[selectedCaseId]) {
+      const cached = caseCacheRef.current[selectedCaseId];
+      const slices = cached.slices || [];
+      setCaseSlices(slices);
+      const total = cached.total_slices || slices.length;
+      setTotalSlices(total);
 
-  // 3. Fetch specific slice detail
-  useEffect(() => {
-    if (!selectedCaseId) return;
+      // Default to slice with tumor or middle slice
+      const tumorIdx = slices.findIndex(s => (s.tumor_area_cm2 > 0) || (s.pixel_counts && s.pixel_counts.tumor > 0));
+      const initialIdx = (tumorIdx !== -1) ? tumorIdx : Math.floor(total / 2);
+      setSliceIndex(initialIdx);
+      if (slices[initialIdx]) {
+        setSliceData(slices[initialIdx]);
+      }
+      if (cached.metrics_3d) {
+        setMetrics3D(cached.metrics_3d);
+      }
+      setLoadingCase(false);
+      setLoadingSlice(false);
+      return;
+    }
+
+    setLoadingCase(true);
     setLoadingSlice(true);
-    fetch(`/api/case/${selectedCaseId}/slice/${sliceIndex}`)
-      .then(res => res.json())
+    setSliceData(null);
+    setCaseSlices([]);
+
+    fetch(`/api/case/${selectedCaseId}/full`)
+      .then(res => {
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        return res.json();
+      })
       .then(data => {
-        setSliceData(data);
+        if (data && data.slices && data.slices.length > 0) {
+          caseCacheRef.current[selectedCaseId] = data;
+          setCaseSlices(data.slices);
+          const total = data.total_slices || data.slices.length;
+          setTotalSlices(total);
+
+          const tumorIdx = data.slices.findIndex(s => (s.tumor_area_cm2 > 0) || (s.pixel_counts && s.pixel_counts.tumor > 0));
+          const initialIdx = (tumorIdx !== -1) ? tumorIdx : Math.floor(total / 2);
+          setSliceIndex(initialIdx);
+          setSliceData(data.slices[initialIdx]);
+
+          if (data.metrics_3d) {
+            setMetrics3D(data.metrics_3d);
+          }
+        }
+        setLoadingCase(false);
         setLoadingSlice(false);
       })
       .catch(err => {
-        console.error("Error fetching slice:", err);
-        setLoadingSlice(false);
-      });
-  }, [selectedCaseId, sliceIndex]);
+        console.warn("Full case fetch fallback:", err);
+        fetch(`/api/case/${selectedCaseId}/slices`)
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.slices) {
+              setTotalSlices(data.total_slices);
+              setSliceIndex(Math.floor(data.total_slices / 2));
+            }
+            setLoadingCase(false);
+          })
+          .catch(() => setLoadingCase(false));
 
-  // 4. Cine Loop Playback
+        fetch(`/api/case/${selectedCaseId}/metrics`)
+          .then(res => (res.ok ? res.json() : null))
+          .then(cached => {
+            if (cached && cached.tnm_stage) setMetrics3D(cached);
+            else setMetrics3D(null);
+          })
+          .catch(() => setMetrics3D(null));
+      });
+  }, [selectedCaseId]);
+
+  // 3. Instant Slice Navigation (Displays suddenly from in-memory case data with ZERO server roundtrip)
+  useEffect(() => {
+    if (caseSlices && caseSlices.length > 0) {
+      const slice = caseSlices[sliceIndex] || caseSlices.find(s => s.slice_index === sliceIndex);
+      if (slice) {
+        setSliceData(slice);
+        setLoadingSlice(false);
+        return; // Zero network latency!
+      }
+    }
+
+    // Fallback: only if whole-case bundle is not yet loaded in memory
+    if (selectedCaseId && !loadingCase) {
+      setLoadingSlice(true);
+      fetch(`/api/case/${selectedCaseId}/slice/${sliceIndex}`)
+        .then(res => res.json())
+        .then(data => {
+          setSliceData(data);
+          setLoadingSlice(false);
+        })
+        .catch(err => {
+          console.error("Error fetching slice fallback:", err);
+          setLoadingSlice(false);
+        });
+    }
+  }, [selectedCaseId, sliceIndex, caseSlices, loadingCase]);
+
+  // 4. Cine Loop Playback (Fluid 60fps playback from RAM)
   useEffect(() => {
     let interval = null;
     if (isPlaying) {
       interval = setInterval(() => {
         setSliceIndex(prev => (prev + 1 >= totalSlices ? 0 : prev + 1));
-      }, 140);
+      }, 100);
     }
     return () => clearInterval(interval);
   }, [isPlaying, totalSlices]);
@@ -290,6 +356,13 @@ export default function App() {
       if (match) detectedName = match[0].toLowerCase();
     }
 
+    try {
+      const url = URL.createObjectURL(imageFiles[0]);
+      setUploadPreviewUrl(url);
+    } catch {
+      setUploadPreviewUrl(null);
+    }
+
     const sliceWord = imageFiles.length === 1 ? 'slice' : 'slices';
     setIsUploading(true);
     setUploadProgressText(`Uploading ${imageFiles.length} CT ${sliceWord} & executing Residual U-Net AI pipeline...`);
@@ -314,6 +387,7 @@ export default function App() {
         setUploadedCaseSliceIndex(data.best_preview_slice);
         setIsUploading(false);
         setUploadProgressText('');
+        setUploadPreviewUrl(null);
 
         if (data.key_preview_slices && data.key_preview_slices.length > 0) {
           const match = data.key_preview_slices.find(s => s.slice_index === data.best_preview_slice);
@@ -337,12 +411,19 @@ export default function App() {
         alert(`Case upload failed: ${err.message}`);
         setIsUploading(false);
         setUploadProgressText('');
+        setUploadPreviewUrl(null);
       });
   };
 
   // 8. Single CT Slice Upload Handler (2D Instant)
   const handleSingleSliceUpload = (file) => {
     if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      setUploadPreviewUrl(url);
+    } catch {
+      setUploadPreviewUrl(null);
+    }
     setIsUploading(true);
     setUploadProgressText("Analyzing single slice with Residual U-Net...");
     const formData = new FormData();
@@ -363,21 +444,30 @@ export default function App() {
         setSingleSliceResult(data);
         setIsUploading(false);
         setUploadProgressText('');
+        setUploadPreviewUrl(null);
       })
       .catch(err => {
         console.error("Single slice upload error:", err);
         alert(`Single slice upload failed: ${err.message}`);
         setIsUploading(false);
         setUploadProgressText('');
+        setUploadPreviewUrl(null);
       });
   };
 
-  // 9. Fetch On-Demand Uploaded Slice
+  // 9. Fetch On-Demand Uploaded Slice (Cached in memory for instant display)
   const fetchUploadedSlice = (cid, sIdx) => {
+    const cacheKey = `${cid}_${sIdx}`;
+    if (uploadedSliceCacheRef.current[cacheKey]) {
+      setUploadedSliceDetail(uploadedSliceCacheRef.current[cacheKey]);
+      setLoadingUploadedSlice(false);
+      return;
+    }
     setLoadingUploadedSlice(true);
     fetch(`/api/uploaded-case/${cid}/slice/${sIdx}`)
       .then(res => res.json())
       .then(data => {
+        uploadedSliceCacheRef.current[cacheKey] = data;
         setUploadedSliceDetail(data);
         setLoadingUploadedSlice(false);
       })
@@ -495,7 +585,15 @@ export default function App() {
                 <select
                   className="select-input"
                   value={selectedCaseId}
-                  onChange={e => setSelectedCaseId(e.target.value)}
+                  onChange={e => {
+                    const newId = e.target.value;
+                    if (newId !== selectedCaseId) {
+                      setLoadingCase(true);
+                      setLoadingSlice(true);
+                      setSliceData(null);
+                      setSelectedCaseId(newId);
+                    }
+                  }}
                 >
                   {cases.map(c => (
                     <option key={c.case_id} value={c.case_id}>
@@ -503,6 +601,13 @@ export default function App() {
                     </option>
                   ))}
                 </select>
+
+                {loadingCase && (
+                  <div className="case-loading-badge">
+                    <RotateCw size={12} className="spin" />
+                    <span>Loading Image...</span>
+                  </div>
+                )}
               </div>
 
               {/* View Mode Buttons */}
@@ -536,7 +641,24 @@ export default function App() {
 
             {/* Viewport Frame */}
             <div className="viewport-frame">
-              {viewMode === 'split' ? (
+              {loadingCase ? (
+                <div className="viewport-loading-overlay">
+                  <div className="loading-image-preview-frame" style={{ width: 190, height: 190, marginBottom: 4 }}>
+                    <Layers size={52} color="var(--accent-primary)" style={{ opacity: 0.7 }} />
+                    <div className="scanner-line" />
+                  </div>
+                  <div className="loading-image-title" style={{ fontSize: '1.25rem' }}>
+                    <RotateCw size={22} className="spin" color="var(--accent-primary)" />
+                    Loading Image...
+                  </div>
+                  <div className="loading-image-subtitle">
+                    Loading patient case <strong>{selectedCaseId}</strong> — preparing CT slices & batch segmentation
+                  </div>
+                  <div className="loading-pulse-bar" style={{ width: 220 }}>
+                    <div className="loading-pulse-fill" />
+                  </div>
+                </div>
+              ) : viewMode === 'split' ? (
                 <div className="split-view-container">
                   <div className="split-pane">
                     <span className="split-pane-label">AI RESIDUAL U-NET</span>
@@ -618,7 +740,13 @@ export default function App() {
                   <ChevronRight size={16} />
                 </button>
                 <div className="slice-counter">
-                  {sliceIndex + 1} / {totalSlices}
+                  {loadingCase ? (
+                    <span style={{ color: 'var(--accent-primary)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <RotateCw size={11} className="spin" /> Loading...
+                    </span>
+                  ) : (
+                    `${sliceIndex + 1} / ${totalSlices}`
+                  )}
                 </div>
               </div>
 
@@ -676,14 +804,28 @@ export default function App() {
                   <ShieldCheck size={18} color="var(--accent-primary)" />
                   AJCC 8th Edition Clinical Staging
                 </div>
-                {metrics3D && (
+                {loadingCase ? (
+                  <span className="badge badge-cyan" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    <RotateCw size={11} className="spin" /> Loading Image...
+                  </span>
+                ) : metrics3D && (
                   <span className="badge badge-cyan">
                     {metrics3D.inference_time_sec}s 3D Inference
                   </span>
                 )}
               </div>
 
-              {metrics3D ? (
+              {loadingCase ? (
+                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>
+                  <RotateCw size={22} className="spin" color="var(--accent-primary)" style={{ margin: '0 auto 8px' }} />
+                  <div style={{ fontWeight: 600, color: 'var(--text-white)' }}>
+                    Reconstructing 3D Volume...
+                  </div>
+                  <div style={{ fontSize: '0.78rem', marginTop: 4 }}>
+                    Analyzing anatomy for {selectedCaseId}
+                  </div>
+                </div>
+              ) : metrics3D ? (
                 <>
                   <div className="tnm-banner">
                     <div className={`stage-badge-large ${metrics3D.tnm_stage === 'cT1a' ? 'stage-badge-t1' : ''}`}>
@@ -874,8 +1016,39 @@ export default function App() {
             onChange={handleSingleFileSelect}
           />
 
-          {/* Drag & Drop Zone */}
-          {(!uploadedCaseResult && !singleSliceResult) && (
+          {/* When Image Is Uploaded: Prominent Loading Image Card */}
+          {isUploading && (
+            <div className="loading-image-card">
+              <div className="loading-image-preview-frame">
+                {uploadPreviewUrl ? (
+                  <img src={uploadPreviewUrl} alt="Uploaded CT preview" className="loading-image-preview-img" />
+                ) : (
+                  <Layers size={56} color="var(--accent-primary)" style={{ opacity: 0.6 }} />
+                )}
+                <div className="scanner-line" />
+              </div>
+
+              <div className="loading-image-title">
+                <RotateCw className="spin" size={24} color="var(--accent-primary)" />
+                Loading Image...
+              </div>
+
+              <div className="loading-image-subtitle">
+                {uploadProgressText || "Uploading CT scan & executing deep learning segmentation..."}
+              </div>
+
+              <div className="loading-pulse-bar">
+                <div className="loading-pulse-fill" />
+              </div>
+
+              <span className="badge badge-cyan" style={{ fontSize: '0.75rem', padding: '4px 12px' }}>
+                PyTorch Neural Core Inference Active
+              </span>
+            </div>
+          )}
+
+          {/* Drag & Drop Zone (Visible when not uploading and no results yet) */}
+          {(!isUploading && !uploadedCaseResult && !singleSliceResult) && (
             <div
               className={`dropzone-box ${dragActive ? 'drag-active' : ''}`}
               onDragOver={e => { e.preventDefault(); setDragActive(true); }}
@@ -920,21 +1093,6 @@ export default function App() {
                   </div>
                 </>
               )}
-            </div>
-          )}
-
-          {/* Live Progress Banner during Inference */}
-          {isUploading && (
-            <div className="upload-loading-banner glass-panel">
-              <RotateCw className="spin" size={24} color="var(--accent-primary)" />
-              <div>
-                <div style={{ fontWeight: 700, color: 'var(--text-white)' }}>
-                  Processing Deep Learning Pipeline
-                </div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                  {uploadProgressText}
-                </div>
-              </div>
             </div>
           )}
 

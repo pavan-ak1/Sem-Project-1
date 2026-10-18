@@ -1,27 +1,21 @@
 # ==============================================================================
-# Multi-Stage Build for React / Vite Frontend
+# React / Vite Frontend Service (Node.js)
 # ==============================================================================
 
-# Stage 1: Build Frontend Assets
-FROM node:20-alpine AS builder
+FROM node:20-alpine
 
 WORKDIR /app
 
+# Install dependencies
 COPY package*.json ./
 RUN npm ci || npm install
 
+# Copy source code and build production assets
 COPY . .
 RUN npm run build
 
-# Stage 2: High-Performance Production Nginx Server
-FROM nginx:alpine
+# Expose Vite preview/dev port
+EXPOSE 3000
 
-# Copy built static assets
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy custom reverse-proxy nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]
+# Start Vite preview server on port 3000
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "3000"]

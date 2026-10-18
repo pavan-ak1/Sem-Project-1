@@ -275,6 +275,8 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
     slices_list = []
     gt_list = []
     has_gt = False
+    filenames = []
+    slice_indices = []
 
     for _, row in case_df.iterrows():
         img_p = IMAGE_DIR / row["filename"]
@@ -288,6 +290,8 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
         else:
             norm = (arr - arr.min()) / max(1e-4, arr.max() - arr.min())
         slices_list.append(norm)
+        filenames.append(str(row["filename"]))
+        slice_indices.append(int(row["slice_index"]))
 
         mask_p = MASK_DIR / row["filename"]
         if mask_p.exists():
@@ -349,6 +353,58 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
 
     report_md = generate_clinical_markdown_report(case_id, vols, pca, staging, t_elapsed)
 
+    # Pre-render all slice payloads for instant client-side inspection
+    px_area_cm2 = (0.78125 * 0.78125) / 100.0
+    slices_bundle = []
+    for i in range(len(slices_list)):
+        s_idx = slice_indices[i]
+        fname = filenames[i]
+        norm = slices_list[i]
+        pred_m = clean_preds_3d[i]
+
+        k_px = int(np.sum(pred_m == 1))
+        t_px = int(np.sum(pred_m == 2))
+        c_px = int(np.sum(pred_m == 3))
+
+        vis_8bit = (np.clip(norm, 0.0, 1.0) * 255).astype(np.uint8)
+        orig_pil = Image.fromarray(vis_8bit).convert("RGB")
+        orig_b64 = image_to_base64_url(orig_pil, format="JPEG")
+
+        overlay_img = create_overlay(norm, pred_m).convert("RGB")
+        overlay_b64 = image_to_base64_url(overlay_img, format="JPEG")
+
+        mask_img = Image.fromarray(pred_m * 80).convert("L")
+        mask_b64 = image_to_base64_url(mask_img, format="PNG")
+
+        gt_overlay_b64 = None
+        gt_mask_b64 = None
+        if has_gt and i < len(gt_list):
+            gt_m = gt_list[i]
+            gt_ov_img = create_overlay(norm, gt_m).convert("RGB")
+            gt_overlay_b64 = image_to_base64_url(gt_ov_img, format="JPEG")
+            gt_mask_b64 = image_to_base64_url(Image.fromarray(gt_m * 80).convert("L"), format="PNG")
+
+        slices_bundle.append({
+            "case_id": case_id,
+            "slice_index": s_idx,
+            "positional_index": i,
+            "filename": fname,
+            "original_image": orig_b64,
+            "overlay_image": overlay_b64,
+            "predicted_mask": mask_b64,
+            "ground_truth_overlay": gt_overlay_b64,
+            "ground_truth_mask": gt_mask_b64,
+            "kidney_area_cm2": round(k_px * px_area_cm2, 2),
+            "tumor_area_cm2": round(t_px * px_area_cm2, 2),
+            "cyst_area_cm2": round(c_px * px_area_cm2, 2),
+            "pixel_counts": {
+                "kidney": k_px,
+                "tumor": t_px,
+                "cyst": c_px,
+                "background": int(np.sum(pred_m == 0))
+            }
+        })
+
     return {
         "case_id": case_id,
         "slices_analyzed": len(slices_list),
@@ -368,8 +424,78 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
         "inference_time_sec": round(t_elapsed, 2),
         "gt_comparison": gt_comparison,
         "report_markdown": report_md,
-        "tta_enabled": use_tta
+        "tta_enabled": use_tta,
+        "slices": slices_bundle
     }
+
+
+# In-memory global cache for instant full-case retrieval
+_case_full_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -> Dict[str, Any]:
+    """
+    Returns all pre-computed/cached slices and 3D metrics for a patient case at once.
+    This enables immediate, zero-latency slice flipping in the UI without per-slice model requests.
+    """
+    if case_id in _case_full_cache:
+        return _case_full_cache[case_id]
+
+    # 1. Check if case was uploaded
+    upload_meta_path = UPLOADED_CASES_DIR / case_id / "meta.json"
+    if upload_meta_path.exists():
+        with open(upload_meta_path, "r", encoding="utf-8") as f:
+            m = json.load(f)
+
+        slices_data = []
+        for s_info in m.get("slices", []):
+            s_idx = s_info["slice_index"]
+            try:
+                sl = get_uploaded_case_slice(case_id, s_idx)
+                slices_data.append(sl)
+            except Exception:
+                pass
+
+        bundle = {
+            "case_id": case_id,
+            "total_slices": len(slices_data),
+            "metrics_3d": {
+                "case_id": case_id,
+                "slices_analyzed": m.get("slices_analyzed", len(slices_data)),
+                "right_kidney_vol_cm3": m["vols"]["right_kidney_vol_cm3"],
+                "left_kidney_vol_cm3": m["vols"]["left_kidney_vol_cm3"],
+                "total_parenchyma_vol_cm3": m["vols"]["total_parenchyma_vol_cm3"],
+                "tumor_vol_cm3": m["vols"]["tumor_vol_cm3"],
+                "cyst_vol_cm3": m["vols"]["cyst_vol_cm3"],
+                "tumor_burden_pct": m["vols"]["tumor_burden_pct"],
+                "length_cm": m["pca"]["length_cm"],
+                "width_cm": m["pca"]["width_cm"],
+                "thickness_cm": m["pca"]["thickness_cm"],
+                "ellipsoid_vol_cm3": m["pca"]["ellipsoid_vol_cm3"],
+                "ellipsoid_error_pct": m["pca"]["ellipsoid_error_pct"],
+                "tnm_stage": m["staging"]["tnm_t_stage"],
+                "surgical_recommendation": m["staging"]["surgical_recommendation"],
+                "inference_time_sec": m.get("inference_time_sec", 1.0),
+                "report_markdown": m.get("report_markdown", "")
+            },
+            "slices": slices_data
+        }
+        _case_full_cache[case_id] = bundle
+        return bundle
+
+    # 2. Dataset case: batch volume inference
+    res = run_patient_case_inference(case_id, use_tta=use_tta)
+    slices_bundle = res.get("slices", [])
+    metrics_3d = {k: v for k, v in res.items() if k != "slices"}
+
+    bundle = {
+        "case_id": case_id,
+        "total_slices": len(slices_bundle),
+        "metrics_3d": metrics_3d,
+        "slices": slices_bundle
+    }
+    _case_full_cache[case_id] = bundle
+    return bundle
 
 
 def natural_sort_key(s: str):

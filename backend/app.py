@@ -34,6 +34,8 @@ from backend.model_loader import load_model, get_device
 from backend.inference_engine import (
     run_single_slice_inference,
     run_patient_case_inference,
+    get_patient_case_full_bundle,
+    _case_full_cache,
     run_uploaded_case_pipeline,
     get_uploaded_case_slice,
     standardize_dims,
@@ -133,26 +135,49 @@ async def list_cases():
                 ai_tnm_stage=str(row["AI_TNM"])
             ))
 
-    # Fallback to dataset.csv unique test cases if scorecard is empty
-    if not results and CSV_PATH.exists():
+    # Always include available test cases from dataset.csv if scorecard is missing or to enrich cohort
+    if CSV_PATH.exists():
+        existing_ids = {r.case_id for r in results}
         df = pd.read_csv(CSV_PATH)
-        test_cases = df[df["split"] == "test"]["case_id"].unique()[:10]
+        test_cases = df[df["split"] == "test"]["case_id"].unique()[:15]
         for cid in test_cases:
-            c_df = df[df["case_id"] == cid]
-            results.append(PatientCaseSummary(
-                case_id=str(cid),
-                slice_count=len(c_df),
-                has_tumor=True,
-                has_cyst=False,
-                split="test"
-            ))
+            if str(cid) not in existing_ids:
+                c_df = df[df["case_id"] == cid]
+                results.append(PatientCaseSummary(
+                    case_id=str(cid),
+                    slice_count=len(c_df),
+                    has_tumor=True,
+                    has_cyst=False,
+                    split="test"
+                ))
 
     return results
 
 
+@app.get("/api/case/{case_id}/full")
+async def get_patient_case_full(case_id: str, tta: Optional[bool] = None):
+    """
+    Returns the complete patient case bundle (all slices + 3D metrics) at once
+    for instant client-side slice navigation without per-slice server roundtrips.
+    """
+    try:
+        bundle = await anyio.to_thread.run_sync(get_patient_case_full_bundle, case_id, tta)
+        if "metrics_3d" in bundle:
+            _case_3d_cache[case_id] = bundle["metrics_3d"]
+        return JSONResponse(content=bundle)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Case full bundle error: {str(e)}")
+
+
 @app.get("/api/case/{case_id}/slices")
-async def get_case_slices(case_id: str):
-    """Returns sorted slice indices and file records for a patient case."""
+async def get_case_slices(case_id: str, full: bool = False):
+    """Returns sorted slice indices or complete slice bundle for a patient case."""
+    if full or (case_id in _case_full_cache):
+        try:
+            return await get_patient_case_full(case_id)
+        except Exception:
+            pass
+
     # Check if case was uploaded
     upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
     if upload_meta.exists():
@@ -190,6 +215,15 @@ async def get_case_slices(case_id: str):
 @app.get("/api/case/{case_id}/slice/{slice_idx}")
 async def get_patient_slice_detail(case_id: str, slice_idx: int, tta: bool = False):
     """Fetches a specific patient slice with ground truth mask and live AI inference."""
+    # Fast path: check in-memory full case cache
+    if case_id in _case_full_cache:
+        slices = _case_full_cache[case_id].get("slices", [])
+        for s in slices:
+            if s.get("slice_index") == slice_idx:
+                return s
+        if 0 <= slice_idx < len(slices):
+            return slices[slice_idx]
+
     # Check if case was uploaded
     if (UPLOADED_CASES_DIR / case_id).exists():
         try:

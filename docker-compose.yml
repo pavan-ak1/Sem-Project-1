@@ -38,7 +38,7 @@ services:
       start_period: 15s
 
   # ============================================================================
-  # 2. React / Vite Frontend UI Service (Served via High-Performance Nginx)
+  # 2. React / Vite Frontend UI Service (Served on port 3000)
   # ============================================================================
   frontend:
     build:
@@ -47,7 +47,9 @@ services:
     container_name: nephroai_frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "3000:3000"
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
     depends_on:
       backend:
         condition: service_healthy
