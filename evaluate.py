@@ -67,6 +67,8 @@ from PIL import Image
 from tqdm import tqdm
 from scipy.ndimage import label
 
+from backend.inference_engine import filter_prediction_slices
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -788,7 +790,8 @@ def run_evaluation(
     anatomical_containment: bool = False,
     min_kidney_voxels: int = 0,
     min_tumor_voxels: int = 0,
-    min_cyst_voxels: int = 0
+    min_cyst_voxels: int = 0,
+    kidney_absence_filter: bool = False
 ) -> Dict[str, Any]:
     """Runs high-throughput batched inference, metric computation, and visualization export."""
     # Graceful DataLoader worker handling for Windows
@@ -815,12 +818,19 @@ def run_evaluation(
 
     criterion = CompositeLoss(num_classes=4)
     metrics_engine = ClinicalEvaluationMetrics(num_classes=4, class_names=CLASS_NAMES)
+    original_metrics_engine = ClinicalEvaluationMetrics(num_classes=4, class_names=CLASS_NAMES) if kidney_absence_filter else None
     use_cuda = (device.type == "cuda")
 
     total_loss_sum = 0.0
     ce_loss_sum = 0.0
     dice_loss_sum = 0.0
     num_batches = 0
+    filter_stats = {
+        "slices_filtered": 0,
+        "tumor_pixels_removed": 0,
+        "cyst_pixels_removed": 0,
+        "lesion_pixels_removed": 0,
+    }
 
     total_batches = len(dataloader)
     target_batches = total_batches if max_batches is None else min(max_batches, total_batches)
@@ -837,6 +847,8 @@ def run_evaluation(
         postproc_desc.append("Anatomical Envelope Containment")
     if min_tumor_voxels > 0 or min_cyst_voxels > 0 or min_kidney_voxels > 0:
         postproc_desc.append(f"CC Filter (K:{min_kidney_voxels}, T:{min_tumor_voxels}, C:{min_cyst_voxels})")
+    if kidney_absence_filter:
+        postproc_desc.append("Kidney-Absence Lesion Filter")
     if not postproc_desc:
         postproc_desc.append("Standard Argmax")
 
@@ -877,6 +889,16 @@ def run_evaluation(
                 min_cyst_voxels=min_cyst_voxels,
                 device=device
             )
+
+            original_preds = preds
+            if kidney_absence_filter:
+                filtered_np, batch_filter_stats = filter_prediction_slices(
+                    preds.detach().cpu().numpy(), log_result=False
+                )
+                preds = torch.from_numpy(filtered_np).to(device=device, dtype=original_preds.dtype)
+                for key, value in batch_filter_stats.items():
+                    filter_stats[key] += value
+                original_metrics_engine.update(original_preds, masks_gpu)
 
             total_loss_sum += loss.item()
             ce_loss_sum += l_ce.item()
@@ -928,6 +950,9 @@ def run_evaluation(
     results["eval_time_sec"] = total_eval_time
     results["slices_evaluated"] = slices_evaluated
     results["throughput_slices_per_sec"] = slices_evaluated / total_eval_time
+    if kidney_absence_filter:
+        results["Original_Prediction_Metrics"] = original_metrics_engine.compute()
+        results["Kidney_Absence_Filter"] = filter_stats
 
     return results
 
@@ -964,6 +989,23 @@ def print_terminal_summary(results: Dict[str, Any], meta: Dict[str, Any], target
         print(f"{c:<14} | {d:<12.4f} | {i:<14.4f} | {p:<11.4f} | {r:<11.4f} | {s:<11.4f}")
     print("-" * 80)
 
+    if "Original_Prediction_Metrics" in results:
+        original = results["Original_Prediction_Metrics"]
+        filter_stats = results["Kidney_Absence_Filter"]
+        print("[KIDNEY-ABSENCE FILTER COMPARISON: Original -> Filtered]")
+        for c in CLASS_NAMES[1:]:
+            print(
+                f"{c:<8} Dice {original['Dice'][f'Dice_{c}']:.4f} -> {results['Dice'][f'Dice_{c}']:.4f} | "
+                f"IoU {original['IoU'][f'IoU_{c}']:.4f} -> {results['IoU'][f'IoU_{c}']:.4f} | "
+                f"Precision {original['Precision'][f'Precision_{c}']:.4f} -> {results['Precision'][f'Precision_{c}']:.4f} | "
+                f"Recall {original['Recall'][f'Recall_{c}']:.4f} -> {results['Recall'][f'Recall_{c}']:.4f}"
+            )
+        print(
+            f"Removed {filter_stats['lesion_pixels_removed']:,} lesion pixels across "
+            f"{filter_stats['slices_filtered']:,} slices "
+            f"(tumor: {filter_stats['tumor_pixels_removed']:,}, cyst: {filter_stats['cyst_pixels_removed']:,})."
+        )
+
     # Pixel Confusion Matrix Table
     print("\n[PIXEL CONFUSION MATRIX (Rows: True Class | Columns: Predicted Class)]")
     header = f"{'True Class':<12} | " + " | ".join([f"{name[:8]:>8}" for name in CLASS_NAMES])
@@ -989,6 +1031,17 @@ def export_run_reports(
 
     # 1. Structured JSON
     json_path = run_dir / "evaluation_summary.json"
+    def per_class_metrics(metrics: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        return {
+            c: {
+                "Dice": metrics["Dice"][f"Dice_{c}"],
+                "IoU": metrics["IoU"][f"IoU_{c}"],
+                "Precision": metrics["Precision"][f"Precision_{c}"],
+                "Recall": metrics["Recall"][f"Recall_{c}"],
+                "Specificity": metrics["Specificity"][f"Specificity_{c}"],
+            } for c in CLASS_NAMES
+        }
+
     full_export = {
         "run_id": run_id,
         "timestamp": timestamp,
@@ -1005,18 +1058,23 @@ def export_run_reports(
             "eval_time_sec": results["eval_time_sec"],
             "slices_evaluated": results["slices_evaluated"],
             "throughput_slices_per_sec": results["throughput_slices_per_sec"],
-            "Per_Class": {
-                c: {
-                    "Dice": results["Dice"][f"Dice_{c}"],
-                    "IoU": results["IoU"][f"IoU_{c}"],
-                    "Precision": results["Precision"][f"Precision_{c}"],
-                    "Recall": results["Recall"][f"Recall_{c}"],
-                    "Specificity": results["Specificity"][f"Specificity_{c}"]
-                } for c in CLASS_NAMES
-            },
+            "Per_Class": per_class_metrics(results),
             "Confusion_Matrix": results["Confusion_Matrix"]
         }
     }
+    if "Original_Prediction_Metrics" in results:
+        original = results["Original_Prediction_Metrics"]
+        full_export["kidney_absence_filter_comparison"] = {
+            "original_predictions": {
+                "Per_Class": per_class_metrics(original),
+                "Confusion_Matrix": original["Confusion_Matrix"],
+            },
+            "filtered_predictions": {
+                "Per_Class": per_class_metrics(results),
+                "Confusion_Matrix": results["Confusion_Matrix"],
+            },
+            "removal_counts": results["Kidney_Absence_Filter"],
+        }
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(full_export, f, indent=2)
 
@@ -1025,6 +1083,7 @@ def export_run_reports(
     rows = []
     for c in CLASS_NAMES:
         rows.append({
+            "Prediction": "Filtered" if "Original_Prediction_Metrics" in results else "Standard",
             "Class": c,
             "Dice_DSC": round(results["Dice"][f"Dice_{c}"], 4),
             "IoU_Jaccard": round(results["IoU"][f"IoU_{c}"], 4),
@@ -1032,6 +1091,18 @@ def export_run_reports(
             "Recall_Sensitivity": round(results["Recall"][f"Recall_{c}"], 4),
             "Specificity_TNR": round(results["Specificity"][f"Specificity_{c}"], 4),
         })
+    if "Original_Prediction_Metrics" in results:
+        original = results["Original_Prediction_Metrics"]
+        for c in CLASS_NAMES:
+            rows.append({
+                "Prediction": "Original",
+                "Class": c,
+                "Dice_DSC": round(original["Dice"][f"Dice_{c}"], 4),
+                "IoU_Jaccard": round(original["IoU"][f"IoU_{c}"], 4),
+                "Precision_PPV": round(original["Precision"][f"Precision_{c}"], 4),
+                "Recall_Sensitivity": round(original["Recall"][f"Recall_{c}"], 4),
+                "Specificity_TNR": round(original["Specificity"][f"Specificity_{c}"], 4),
+            })
     pd.DataFrame(rows).to_csv(csv_path, index=False)
 
     # 3. Execution Run Metadata
@@ -1066,15 +1137,38 @@ def export_run_reports(
             f"{results['Specificity'][f'Specificity_{c}']:.4f} |"
         )
 
+    if "Original_Prediction_Metrics" in results:
+        original = results["Original_Prediction_Metrics"]
+        filter_stats = results["Kidney_Absence_Filter"]
+        md_lines.extend([
+            "",
+            "## 3. Kidney-Absence Filter Comparison",
+            "| Class | Prediction | Dice | IoU | Precision | Recall |",
+            "|---|---|---|---|---|---|",
+        ])
+        for c in CLASS_NAMES[1:]:
+            for label, metrics in (("Original", original), ("Filtered", results)):
+                md_lines.append(
+                    f"| {c} | {label} | {metrics['Dice'][f'Dice_{c}']:.4f} | "
+                    f"{metrics['IoU'][f'IoU_{c}']:.4f} | {metrics['Precision'][f'Precision_{c}']:.4f} | "
+                    f"{metrics['Recall'][f'Recall_{c}']:.4f} |"
+                )
+        md_lines.append(
+            f"- **Lesion pixels removed:** {filter_stats['lesion_pixels_removed']:,} across "
+            f"{filter_stats['slices_filtered']:,} slices (tumor: {filter_stats['tumor_pixels_removed']:,}; "
+            f"cyst: {filter_stats['cyst_pixels_removed']:,})."
+        )
+
     md_lines.extend([
         "",
-        "## 3. Post-Processing & Calibration Configuration",
+        "## 4. Post-Processing & Calibration Configuration",
         f"- **Inference Mode:** {'Calibrated & Post-Processed' if (getattr(args, 'calibrated', False) or getattr(args, 'anatomical_containment', False)) else 'Standard Argmax'}",
         f"- **Probability Thresholds:** Tumor = {getattr(args, 'tumor_thresh', 0.35):.2f} | Cyst = {getattr(args, 'cyst_thresh', 0.28):.2f} | Kidney = {getattr(args, 'kidney_thresh', 0.50):.2f}",
         f"- **Anatomical Envelope Containment:** {'ACTIVE (GPU-accelerated)' if getattr(args, 'anatomical_containment', False) else 'Disabled'}",
         f"- **Morphological CC Noise Filter:** {'ACTIVE' if (getattr(args, 'min_kidney_voxels', 0) > 0 or getattr(args, 'min_tumor_voxels', 0) > 0 or getattr(args, 'min_cyst_voxels', 0) > 0) else 'Disabled'}",
+        f"- **Kidney-Absence Lesion Filter:** {'ACTIVE' if getattr(args, 'kidney_absence_filter', False) else 'Disabled'}",
         "",
-        "## 4. Visual Artifacts",
+        "## 5. Visual Artifacts",
         "- `confusion_matrix.png` — Pixel confusion matrix heatmap",
         "- `metrics_barchart.png` — Multi-metric comparison bar chart",
         "- `visualizations/` — 4-panel axial CT slice prediction overlays",
@@ -1298,6 +1392,10 @@ def parse_args() -> argparse.Namespace:
         "--post-process", action="store_true", default=False,
         help="Comprehensive post-processing: calibrated thresholding + anatomical containment + CC noise filter"
     )
+    parser.add_argument(
+        "--kidney-absence-filter", action="store_true", default=False,
+        help="Remove tumor and cyst predictions only on slices with no predicted kidney, and report original versus filtered metrics"
+    )
 
     return parser.parse_args()
 
@@ -1392,7 +1490,8 @@ def main():
         anatomical_containment=args.anatomical_containment,
         min_kidney_voxels=args.min_kidney_voxels,
         min_tumor_voxels=args.min_tumor_voxels,
-        min_cyst_voxels=args.min_cyst_voxels
+        min_cyst_voxels=args.min_cyst_voxels,
+        kidney_absence_filter=args.kidney_absence_filter
     )
 
     # 5. Visual Artifacts Generation

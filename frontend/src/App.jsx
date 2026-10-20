@@ -43,6 +43,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState('ai_overlay'); // 'ai_overlay' | 'gt_overlay' | 'split' | 'pure_ct'
   const [opacity, setOpacity] = useState(0.65);
   const [visibleLayers, setVisibleLayers] = useState({ kidney: true, tumor: true, cyst: true });
+  const [maskOverlayUrl, setMaskOverlayUrl] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
   // 3D Case Analytics State
@@ -207,6 +208,62 @@ export default function App() {
     }
     return () => clearInterval(interval);
   }, [isPlaying, totalSlices]);
+
+  // Build a transparent colour layer from the class-mask so each anatomy
+  // control can be toggled independently over the unchanged CT image.
+  useEffect(() => {
+    if (!sliceData || viewMode === 'pure_ct' || viewMode === 'split') {
+      setMaskOverlayUrl(null);
+      return undefined;
+    }
+
+    const maskSource = viewMode === 'gt_overlay'
+      ? sliceData.ground_truth_mask
+      : sliceData.predicted_mask;
+    if (!maskSource) {
+      setMaskOverlayUrl(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const maskImage = new Image();
+    maskImage.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = maskImage.naturalWidth;
+      canvas.height = maskImage.naturalHeight;
+      const context = canvas.getContext('2d');
+      context.drawImage(maskImage, 0, 0);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+      const palette = {
+        1: [16, 185, 129, 140],
+        2: [239, 68, 68, 180],
+        3: [59, 130, 246, 160]
+      };
+      const layerVisibility = [false, visibleLayers.kidney, visibleLayers.tumor, visibleLayers.cyst];
+
+      for (let i = 0; i < pixels.data.length; i += 4) {
+        const classId = Math.round(pixels.data[i] / 80);
+        const color = palette[classId];
+        if (color && layerVisibility[classId]) {
+          pixels.data[i] = color[0];
+          pixels.data[i + 1] = color[1];
+          pixels.data[i + 2] = color[2];
+          pixels.data[i + 3] = color[3];
+        } else {
+          pixels.data[i + 3] = 0;
+        }
+      }
+
+      context.putImageData(pixels, 0, 0);
+      if (!cancelled) setMaskOverlayUrl(canvas.toDataURL('image/png'));
+    };
+    maskImage.onerror = () => {
+      if (!cancelled) setMaskOverlayUrl(null);
+    };
+    maskImage.src = maskSource;
+
+    return () => { cancelled = true; };
+  }, [sliceData, viewMode, visibleLayers]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -760,20 +817,21 @@ export default function App() {
               ) : (
                 <>
                   {sliceData && (
-                    <img
-                      src={
-                        viewMode === 'pure_ct'
-                          ? sliceData.original_image
-                          : viewMode === 'gt_overlay'
-                          ? (sliceData.ground_truth_overlay || sliceData.overlay_image)
-                          : sliceData.overlay_image
-                      }
-                      alt="CT Slice"
-                      className="viewport-image"
-                      style={{
-                        opacity: viewMode === 'pure_ct' ? 1.0 : opacity
-                      }}
-                    />
+                    viewMode === 'pure_ct' ? (
+                      <img src={sliceData.original_image} alt="CT Slice" className="viewport-image" />
+                    ) : (
+                      <>
+                        <img src={sliceData.original_image} alt="CT Slice" className="viewport-image" />
+                        <img
+                          src={maskOverlayUrl || (viewMode === 'gt_overlay'
+                            ? (sliceData.ground_truth_overlay || sliceData.overlay_image)
+                            : sliceData.overlay_image)}
+                          alt="Segmentation overlay"
+                          className="viewport-overlay-layer"
+                          style={{ opacity }}
+                        />
+                      </>
+                    )
                   )}
                   {loadingSlice && (
                     <div style={{ position: 'absolute', bottom: 12, right: 12, background: 'rgba(0,0,0,0.7)', padding: '4px 8px', borderRadius: 4, fontSize: '0.7rem' }}>
@@ -865,7 +923,9 @@ export default function App() {
                     step="0.05"
                     value={opacity}
                     onChange={e => setOpacity(parseFloat(e.target.value))}
+                    aria-label="Segmentation overlay opacity"
                   />
+                  <output>{Math.round(opacity * 100)}%</output>
                 </div>
               </div>
             </div>

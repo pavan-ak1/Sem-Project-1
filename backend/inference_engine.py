@@ -1,6 +1,7 @@
 import io
 import time
 import base64
+import logging
 from pathlib import Path
 from typing import Tuple, Dict, Any, List, Optional
 
@@ -38,6 +39,64 @@ PALETTE = {
     2: (239, 68, 68, 180),   # Tumor: Crimson Red (#EF4444)
     3: (59, 130, 246, 160),  # Cyst: Cerulean Blue (#3B82F6)
 }
+
+logger = logging.getLogger(__name__)
+
+
+def filter_predictions(pred_mask: np.ndarray) -> np.ndarray:
+    """Remove lesion predictions from a 2D slice with no predicted kidney.
+
+    This intentionally applies only the kidney-absence rule. It does not alter
+    slices that contain any kidney pixels and never mutates ``pred_mask``.
+    """
+    if pred_mask.ndim != 2:
+        raise ValueError(f"Expected a 2D prediction mask, got shape {pred_mask.shape}.")
+
+    filtered_mask = pred_mask.copy()
+    if np.any(pred_mask == 1):
+        return filtered_mask
+
+    filtered_mask[(pred_mask == 2) | (pred_mask == 3)] = 0
+    return filtered_mask
+
+
+def filter_prediction_slices(
+    pred_masks: np.ndarray,
+    log_result: bool = True
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    """Apply ``filter_predictions`` to every slice and collect removal counts."""
+    if pred_masks.ndim != 3:
+        raise ValueError(f"Expected (D, H, W) prediction masks, got shape {pred_masks.shape}.")
+
+    filtered_masks = np.empty_like(pred_masks)
+    slices_filtered = 0
+    tumor_pixels_removed = 0
+    cyst_pixels_removed = 0
+
+    for index, pred_mask in enumerate(pred_masks):
+        filtered_mask = filter_predictions(pred_mask)
+        removed_tumor = int(np.sum((pred_mask == 2) & (filtered_mask == 0)))
+        removed_cyst = int(np.sum((pred_mask == 3) & (filtered_mask == 0)))
+        if removed_tumor or removed_cyst:
+            slices_filtered += 1
+            tumor_pixels_removed += removed_tumor
+            cyst_pixels_removed += removed_cyst
+        filtered_masks[index] = filtered_mask
+
+    stats = {
+        "slices_filtered": slices_filtered,
+        "tumor_pixels_removed": tumor_pixels_removed,
+        "cyst_pixels_removed": cyst_pixels_removed,
+        "lesion_pixels_removed": tumor_pixels_removed + cyst_pixels_removed,
+    }
+    if log_result:
+        logger.info(
+            "Kidney-absence filtering: %d slices filtered; %d tumor and %d cyst pixels removed.",
+            stats["slices_filtered"],
+            stats["tumor_pixels_removed"],
+            stats["cyst_pixels_removed"],
+        )
+    return filtered_masks, stats
 
 
 def standardize_dims(image: np.ndarray, target_h: int = 512, target_w: int = 512) -> np.ndarray:
@@ -221,7 +280,9 @@ def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = Non
         norm_img = (img_std - img_std.min()) / max(1e-4, img_std.max() - img_std.min())
 
     tensor_in = torch.from_numpy(norm_img).unsqueeze(0).unsqueeze(0).to(device)
-    pred_mask = predict_tensor(model, tensor_in, device, use_tta=use_tta)[0]
+    raw_pred_mask = predict_tensor(model, tensor_in, device, use_tta=use_tta)[0]
+    filtered_masks, filter_stats = filter_prediction_slices(raw_pred_mask[np.newaxis, ...])
+    pred_mask = filtered_masks[0]
 
     t_elapsed = (time.perf_counter() - t_start) * 1000.0
 
@@ -253,7 +314,8 @@ def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = Non
             "background": int(np.sum(pred_mask == 0))
         },
         "inference_time_ms": round(t_elapsed, 1),
-        "tta_enabled": use_tta
+        "tta_enabled": use_tta,
+        "kidney_absence_filter": filter_stats,
     }
 
 
@@ -316,7 +378,8 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
             preds_3d.append(p_batch)
 
     raw_preds_3d = np.concatenate(preds_3d, axis=0)
-    clean_preds_3d = clean_segmentation_volume(raw_preds_3d)
+    kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
+    clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
     # Clinical volumetric calculations
     vols = calculate_physical_volumes(clean_preds_3d, VOXEL_SPACING_DEFAULT)
@@ -425,6 +488,7 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
         "gt_comparison": gt_comparison,
         "report_markdown": report_md,
         "tta_enabled": use_tta,
+        "kidney_absence_filter": filter_stats,
         "slices": slices_bundle
     }
 
@@ -584,7 +648,8 @@ def run_uploaded_case_pipeline(
             preds_3d.append(p_batch)
 
     raw_preds_3d = np.concatenate(preds_3d, axis=0)
-    clean_preds_3d = clean_segmentation_volume(raw_preds_3d)
+    kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
+    clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
     # Physical volume, PCA calipers, TNM staging
     vols = calculate_physical_volumes(clean_preds_3d, VOXEL_SPACING_DEFAULT)
@@ -708,6 +773,7 @@ def run_uploaded_case_pipeline(
         "surgical_recommendation": staging["surgical_recommendation"],
         "inference_time_sec": round(t_elapsed, 2),
         "tta_enabled": use_tta,
+        "kidney_absence_filter": filter_stats,
         "slices": slices_summary,
         "key_preview_slices": key_previews,
         "report_markdown": report_md

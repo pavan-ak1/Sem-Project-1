@@ -223,6 +223,7 @@
   height: 100%;
   object-fit: contain;
   pointer-events: none;
+  transition: opacity var(--transition-fast);
 }
 
 .split-view-container {
@@ -347,7 +348,15 @@
   gap: 8px;
   font-size: 0.725rem;
   color: var(--text-muted);
-  width: 140px;
+  width: 178px;
+}
+
+.opacity-slider-wrapper output {
+  min-width: 30px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-align: right;
 }
 
 /* --- ANALYTICS PANEL (RIGHT) --- */
@@ -961,6 +970,35 @@
   animation: pulse 1.8s infinite;
 }
 
+/* Keep loading states within the same light clinical workspace as the rest of
+   the application.  The scan itself can still provide contrast, without
+   turning the surrounding screen into a dark-mode surface. */
+.loading-image-card {
+  background: #FFFFFF;
+  border-color: #C9D9FA;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.10), inset 0 0 24px rgba(37, 99, 235, 0.04);
+}
+
+.loading-image-preview-frame {
+  background: #F3F7FB;
+  border-color: #C9D9FA;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.10);
+}
+
+.loading-image-preview-img { opacity: 0.88; }
+.loading-image-title { color: var(--text-primary); }
+.loading-pulse-bar { background: #E6EDF5; }
+
+.viewport-loading-overlay {
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(8px);
+}
+
+.case-loading-badge {
+  background: #E8F0FF;
+  border-color: #C9D9FA;
+}
+
 /* ============================================================================
    Clinical workstation refinement
    ============================================================================ */
@@ -986,24 +1024,24 @@
 .nav-tab.active { background: #E8F0FF; color: var(--accent-primary); box-shadow: none; }
 .status-pill { background: #F3F7FB; border-color: var(--glass-border); color: var(--text-secondary); }
 .caseboard-shell { min-height: calc(100vh - 58px); display: grid; grid-template-columns: 244px minmax(0, 1fr); }
-.study-tray { display: flex; flex-direction: column; background: #142033; color: #E7EDF4; border-right: 1px solid #27384F; padding: 20px 12px 14px; }
+.study-tray { display: flex; flex-direction: column; background: #FFFFFF; color: var(--text-primary); border-right: 1px solid var(--glass-border); padding: 20px 12px 14px; }
 .tray-top { display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
 .tray-heading { font-size: 0.88rem; font-weight: 750; letter-spacing: -0.01em; }
-.tray-upload { width: 31px; height: 31px; display: grid; place-items: center; color: #CFE0FF; background: #203451; border: 1px solid #355171; border-radius: 7px; cursor: pointer; }
-.tray-upload:hover { color: #fff; background: #2A4870; }
-.tray-search { margin: 18px 6px 18px; padding: 8px 10px; color: #8FA1B7; background: #1B2B43; border: 1px solid #2B405D; border-radius: 6px; font-size: 0.72rem; }
-.tray-section-label, .tray-footer-label { margin: 0 8px 8px; color: #8398B2; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.13em; }
+.tray-upload { width: 31px; height: 31px; display: grid; place-items: center; color: var(--accent-primary); background: #E8F0FF; border: 1px solid #C9D9FA; border-radius: 7px; cursor: pointer; }
+.tray-upload:hover { color: var(--accent-primary-hover); background: #DCE9FF; }
+.tray-search { margin: 18px 6px 18px; padding: 8px 10px; color: var(--text-muted); background: #F8FAFC; border: 1px solid var(--glass-border); border-radius: 6px; font-size: 0.72rem; }
+.tray-section-label, .tray-footer-label { margin: 0 8px 8px; color: var(--text-muted); font-size: 0.62rem; font-weight: 800; letter-spacing: 0.13em; }
 .tray-case-list { display: grid; gap: 4px; overflow-y: auto; }
-.tray-case { width: 100%; display: grid; grid-template-columns: 25px 1fr 6px; align-items: center; gap: 7px; padding: 10px 8px; color: #C1CDDB; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
-.tray-case:hover { background: #1B2B43; }
-.tray-case.selected { color: #fff; background: #213958; border-color: #34577F; }
-.tray-case-index { color: #6F849E; font: 700 0.67rem var(--font-mono); }
+.tray-case { width: 100%; display: grid; grid-template-columns: 25px 1fr 6px; align-items: center; gap: 7px; padding: 10px 8px; color: var(--text-secondary); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
+.tray-case:hover { background: #F3F7FB; }
+.tray-case.selected { color: var(--text-primary); background: #E8F0FF; border-color: #C9D9FA; }
+.tray-case-index { color: var(--text-muted); font: 700 0.67rem var(--font-mono); }
 .tray-case-content { min-width: 0; }
 .tray-case-content strong, .tray-case-content small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tray-case-content strong { font-size: 0.74rem; font-weight: 700; }
-.tray-case-content small { margin-top: 3px; color: #8FA1B7; font-size: 0.64rem; }
+.tray-case-content small { margin-top: 3px; color: var(--text-muted); font-size: 0.64rem; }
 .tray-case-dot { width: 6px; height: 6px; border-radius: 50%; background: #F07171; }
-.tray-footer { margin-top: auto; padding: 14px 8px 0; border-top: 1px solid #2A3C55; color: #9CB1C8; font-size: 0.67rem; }
+.tray-footer { margin-top: auto; padding: 14px 8px 0; border-top: 1px solid var(--glass-border); color: var(--text-muted); font-size: 0.67rem; }
 .tray-footer span { display: flex; align-items: center; gap: 6px; }
 .tray-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #4ED0A1; }
 .main-layout { max-width: none; margin: 0; padding: 28px 34px 44px; gap: 22px; grid-template-columns: minmax(540px, 1.5fr) minmax(330px, .8fr); align-content: start; }

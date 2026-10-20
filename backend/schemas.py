@@ -34,6 +34,7 @@ class SlicePredictionResponse(BaseModel):
     pixel_counts: Dict[str, int]
     inference_time_ms: float
     tta_enabled: Optional[bool] = True
+    kidney_absence_filter: Optional[Dict[str, int]] = None
 
 class Patient3DMetrics(BaseModel):
     case_id: str
@@ -99,6 +100,7 @@ class CaseUploadResponse(BaseModel):
     surgical_recommendation: str
     inference_time_sec: float
     tta_enabled: Optional[bool] = True
+    kidney_absence_filter: Optional[Dict[str, int]] = None
     slices: List[CaseUploadSliceItem]
     key_preview_slices: Optional[List[CaseUploadPreviewSlice]] = []
     report_markdown: str
