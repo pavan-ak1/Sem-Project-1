@@ -30,7 +30,7 @@ from backend.schemas import (
     CaseUploadResponse,
     CaseUploadSliceItem
 )
-from backend.model_loader import load_model, get_device
+from backend.model_loader import load_model, get_device, is_model_loaded
 from backend.inference_engine import (
     run_single_slice_inference,
     run_patient_case_inference,
@@ -83,7 +83,7 @@ async def health_check():
         status="healthy",
         device=str(device),
         cuda_available=(device.type == "cuda"),
-        model_loaded=True,
+        model_loaded=is_model_loaded(),
         checkpoint_path=str(checkpoint_p),
         model_architecture="Medical 2D Residual U-Net (InstanceNorm2d + PReLU)",
         parameters=8113718

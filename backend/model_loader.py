@@ -97,6 +97,10 @@ _model: Optional[ResidualUNet] = None
 _device: Optional[torch.device] = None
 _checkpoint_path: Optional[str] = None
 
+def is_model_loaded() -> bool:
+    """Returns whether a checkpoint-backed model is currently available."""
+    return _model is not None
+
 
 def get_device() -> torch.device:
     """Returns CUDA device if available and functional, otherwise falls back to CPU."""

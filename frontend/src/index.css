@@ -1,23 +1,23 @@
 /* ==============================================================================
-   NephroAI Design System — Premium Medical Dark Theme & Glassmorphism
+   NephroAI Design System — Light clinical workstation theme
    ============================================================================== */
 
 :root {
-  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
   /* Theme Canvas */
-  --bg-deep: #080B12;
-  --bg-base: #0E131F;
-  --bg-surface: #151C2C;
-  --bg-surface-elevated: #1C2538;
-  --bg-surface-hover: #232E46;
+  --bg-deep: #F4F7FA;
+  --bg-base: #F8FAFC;
+  --bg-surface: #FFFFFF;
+  --bg-surface-elevated: #F1F5F9;
+  --bg-surface-hover: #EAF0F6;
 
   /* Glassmorphism */
-  --glass-bg: rgba(21, 28, 44, 0.7);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-border-subtle: rgba(255, 255, 255, 0.04);
-  --glass-shadow: 0 12px 32px 0 rgba(0, 0, 0, 0.45);
+  --glass-bg: #FFFFFF;
+  --glass-border: #DCE4EC;
+  --glass-border-subtle: #E9EEF3;
+  --glass-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
 
   /* Anatomical & Clinical Colors */
   --color-kidney: #10B981;        /* Emerald Green */
@@ -28,24 +28,24 @@
   --color-cyst-glow: rgba(59, 130, 246, 0.25);
 
   /* UI Accents */
-  --accent-primary: #06B6D4;      /* Medical Cyan */
-  --accent-primary-hover: #0891B2;
-  --accent-glow: rgba(6, 182, 212, 0.3);
+  --accent-primary: #2563EB;      /* Clinical blue */
+  --accent-primary-hover: #1D4ED8;
+  --accent-glow: rgba(37, 99, 235, 0.16);
   --accent-purple: #8B5CF6;
   --accent-amber: #F59E0B;
 
   /* Typography */
-  --text-white: #F8FAFC;
-  --text-primary: #E2E8F0;
-  --text-secondary: #94A3B8;
-  --text-muted: #64748B;
-  --text-dim: #475569;
+  --text-white: #172033;
+  --text-primary: #243247;
+  --text-secondary: #526176;
+  --text-muted: #718096;
+  --text-dim: #94A3B8;
 
   /* Borders & Radius */
-  --border-radius-sm: 6px;
-  --border-radius-md: 10px;
-  --border-radius-lg: 14px;
-  --border-radius-xl: 18px;
+  --border-radius-sm: 5px;
+  --border-radius-md: 8px;
+  --border-radius-lg: 10px;
+  --border-radius-xl: 14px;
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -65,10 +65,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
-  background-image: 
-    radial-gradient(circle at 15% 15%, rgba(6, 182, 212, 0.05) 0%, transparent 40%),
-    radial-gradient(circle at 85% 85%, rgba(16, 185, 129, 0.04) 0%, transparent 45%);
-  background-attachment: fixed;
+  background-image: none;
 }
 
 /* Scrollbar customization */
@@ -80,7 +77,7 @@ body {
   background: var(--bg-deep);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-surface-elevated);
+  background: #E4EAF1;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -90,8 +87,6 @@ body {
 /* Glass Card Utility */
 .glass-panel {
   background: var(--glass-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   border-radius: var(--border-radius-lg);
   box-shadow: var(--glass-shadow);
@@ -159,7 +154,7 @@ body {
 
 /* Buttons */
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent-primary), #0284C7);
+  background: var(--accent-primary);
   color: #FFFFFF;
   border: none;
   font-weight: 600;
@@ -171,11 +166,11 @@ body {
   align-items: center;
   gap: 8px;
   transition: all var(--transition-fast);
-  box-shadow: 0 2px 8px var(--accent-glow);
+  box-shadow: 0 2px 5px var(--accent-glow);
 }
 
 .btn-primary:hover {
-  background: linear-gradient(135deg, #22D3EE, var(--accent-primary));
+  background: var(--accent-primary-hover);
   box-shadow: 0 4px 14px var(--accent-glow);
   transform: translateY(-1px);
 }

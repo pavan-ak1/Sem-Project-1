@@ -61,6 +61,7 @@ export default function App() {
   const [uploadProgressText, setUploadProgressText] = useState('');
   const [uploadPreviewUrl, setUploadPreviewUrl] = useState(null);
   const [dragActive, setDragActive] = useState(false);
+  const [uploadError, setUploadError] = useState('');
 
   // Modal State
   const [reportModalOpen, setReportModalOpen] = useState(false);
@@ -321,6 +322,14 @@ export default function App() {
     }
   };
 
+  const analysisReady = () => {
+    if (health && !health.model_loaded) {
+      setUploadError('Analysis is unavailable because no trained model checkpoint is configured. Add the checkpoint, then restart the API before uploading a study.');
+      return false;
+    }
+    return true;
+  };
+
   const handleMultiFilesSelect = (e) => {
     if (e.target.files && e.target.files.length > 0) {
       handleCaseFolderUpload(Array.from(e.target.files));
@@ -335,6 +344,7 @@ export default function App() {
 
   // 7. Case Folder Upload Handler (3D Pipeline)
   const handleCaseFolderUpload = (filesList) => {
+    if (!analysisReady()) return;
     const validExts = ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.dcm'];
     const imageFiles = filesList.filter(f => {
       const name = f.name.toLowerCase();
@@ -342,9 +352,11 @@ export default function App() {
     });
 
     if (imageFiles.length === 0) {
-      alert("No valid CT slice images found (supported: PNG, JPG, TIFF).");
+      setUploadError('No compatible CT slices were selected. Use PNG, JPG, TIFF, BMP, or DICOM files.');
       return;
     }
+
+    setUploadError('');
 
     let detectedName = '';
     if (imageFiles[0].webkitRelativePath) {
@@ -408,7 +420,9 @@ export default function App() {
       })
       .catch(err => {
         console.error("Case upload error:", err);
-        alert(`Case upload failed: ${err.message}`);
+        setUploadError(err.message.includes('Checkpoint not found')
+          ? 'Analysis could not start because the trained model checkpoint is missing. Configure the model, then try again.'
+          : 'The study could not be analyzed. Check that the files are supported and the analysis service is running.');
         setIsUploading(false);
         setUploadProgressText('');
         setUploadPreviewUrl(null);
@@ -418,6 +432,8 @@ export default function App() {
   // 8. Single CT Slice Upload Handler (2D Instant)
   const handleSingleSliceUpload = (file) => {
     if (!file) return;
+    if (!analysisReady()) return;
+    setUploadError('');
     try {
       const url = URL.createObjectURL(file);
       setUploadPreviewUrl(url);
@@ -448,7 +464,9 @@ export default function App() {
       })
       .catch(err => {
         console.error("Single slice upload error:", err);
-        alert(`Single slice upload failed: ${err.message}`);
+        setUploadError(err.message.includes('Checkpoint not found')
+          ? 'Analysis could not start because the trained model checkpoint is missing. Configure the model, then try again.'
+          : 'The slice could not be analyzed. Check the file and service status, then try again.');
         setIsUploading(false);
         setUploadProgressText('');
         setUploadPreviewUrl(null);
@@ -573,41 +591,99 @@ export default function App() {
 
       {/* --- MAIN WORKSPACE --- */}
       {activeTab === 'explorer' ? (
-        <main className="main-layout">
+        cases.length === 0 ? (
+          <main className="empty-workspace">
+            <section className="empty-hero glass-panel">
+              <div className="empty-icon"><Layers size={26} /></div>
+              <div className="eyebrow">CASE REVIEW WORKSPACE</div>
+              <h1>No imaging studies available</h1>
+              <p>
+                Connect a dataset or upload a CT study to start renal segmentation,
+                volumetric analysis, and clinical staging.
+              </p>
+              <div className="empty-actions">
+                <button className="btn-primary" onClick={() => setActiveTab('upload')}>
+                  <Upload size={16} /> Upload a study
+                </button>
+                <button className="btn-secondary" onClick={() => window.open('/docs', '_blank')}>
+                  <FileText size={16} /> View API documentation
+                </button>
+              </div>
+            </section>
+
+            <section className="empty-guidance glass-panel">
+              <div>
+                <div className="card-kicker">WHAT YOU CAN REVIEW</div>
+                <h2>From slice-level anatomy to clinical context</h2>
+              </div>
+              <div className="guidance-items">
+                <div><span>01</span><p><strong>Segment anatomy</strong><br />Review kidney, tumor, and cyst overlays.</p></div>
+                <div><span>02</span><p><strong>Measure volume</strong><br />Inspect organ volumes and tumor burden.</p></div>
+                <div><span>03</span><p><strong>Generate a report</strong><br />Translate findings into a clinical summary.</p></div>
+              </div>
+            </section>
+          </main>
+        ) : (
+        <div className="caseboard-shell">
+          <aside className="study-tray" aria-label="Study navigation">
+            <div className="tray-top">
+              <div className="tray-heading">Studies</div>
+              <button className="tray-upload" onClick={() => setActiveTab('upload')} title="Upload a study">
+                <Upload size={16} />
+              </button>
+            </div>
+            <div className="tray-search">Search studies</div>
+            <div className="tray-section-label">AVAILABLE CASES</div>
+            <div className="tray-case-list">
+              {cases.map((c, index) => (
+                <button
+                  key={c.case_id}
+                  className={`tray-case ${selectedCaseId === c.case_id ? 'selected' : ''}`}
+                  onClick={() => {
+                    if (c.case_id !== selectedCaseId) {
+                      setLoadingCase(true);
+                      setLoadingSlice(true);
+                      setSliceData(null);
+                      setSelectedCaseId(c.case_id);
+                    }
+                  }}
+                >
+                  <span className="tray-case-index">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="tray-case-content">
+                    <strong>{c.case_id}</strong>
+                    <small>{c.slice_count} slices · {c.has_tumor ? 'Finding detected' : 'Review pending'}</small>
+                  </span>
+                  {c.has_tumor && <span className="tray-case-dot" />}
+                </button>
+              ))}
+            </div>
+            <div className="tray-footer">
+              <div className="tray-footer-label">WORKSPACE</div>
+              <span><i className="tray-status-dot" /> {health?.device ? `${health.device.toUpperCase()} connected` : 'Checking connection'}</span>
+            </div>
+          </aside>
+          <main className="main-layout">
+          <div className="review-context">
+            <div>
+              <div className="context-kicker">CASE REVIEW / EVIDENCE WORKSPACE</div>
+              <h1>Read the study in layers.</h1>
+              <p>Move from image evidence to quantitative findings, then document the clinical interpretation.</p>
+            </div>
+            <div className="context-notes">
+              <span><strong>← →</strong> Navigate slices</span>
+              <span><strong>Space</strong> Cine loop</span>
+              <span className="context-divider" />
+              <span className="review-state"><i /> Review in progress</span>
+            </div>
+          </div>
           {/* LEFT: CT VIEWER PANEL */}
           <section className="glass-panel viewer-panel">
             {/* Header Controls */}
             <div className="viewer-header">
-              <div className="case-select-wrapper">
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                  PATIENT CASE:
-                </span>
-                <select
-                  className="select-input"
-                  value={selectedCaseId}
-                  onChange={e => {
-                    const newId = e.target.value;
-                    if (newId !== selectedCaseId) {
-                      setLoadingCase(true);
-                      setLoadingSlice(true);
-                      setSliceData(null);
-                      setSelectedCaseId(newId);
-                    }
-                  }}
-                >
-                  {cases.map(c => (
-                    <option key={c.case_id} value={c.case_id}>
-                      {c.case_id} — ({c.slice_count} slices {c.has_tumor ? '• Neoplasm' : ''})
-                    </option>
-                  ))}
-                </select>
-
-                {loadingCase && (
-                  <div className="case-loading-badge">
-                    <RotateCw size={12} className="spin" />
-                    <span>Loading Image...</span>
-                  </div>
-                )}
+              <div className="viewer-study-meta">
+                <div className="viewer-overline">AXIAL / PORTAL VENOUS PHASE</div>
+                <div className="viewer-case-name">{selectedCaseId}</div>
+                {loadingCase && <span className="viewer-loading"><RotateCw size={12} className="spin" /> Preparing study</span>}
               </div>
 
               {/* View Mode Buttons */}
@@ -961,7 +1037,9 @@ export default function App() {
               )}
             </div>
           </section>
-        </main>
+          </main>
+        </div>
+        )
       ) : (
         /* --- DUAL MODE UPLOAD VIEW: WHOLE CASE FOLDER & SINGLE CT SLICE --- */
         <main className="upload-container">
@@ -989,6 +1067,24 @@ export default function App() {
               <span>Single CT Slice (2D Instant Segmentation)</span>
             </button>
           </div>
+
+          {(health && !health.model_loaded) && (
+            <div className="analysis-unavailable" role="status">
+              <AlertTriangle size={18} />
+              <div>
+                <strong>Analysis is not configured on this machine.</strong>
+                <span>Add a trained model checkpoint, restart the API, then upload a study.</span>
+              </div>
+            </div>
+          )}
+
+          {uploadError && (
+            <div className="upload-error" role="alert">
+              <AlertTriangle size={17} />
+              <span>{uploadError}</span>
+              <button onClick={() => setUploadError('')} aria-label="Dismiss message">×</button>
+            </div>
+          )}
 
           {/* Hidden File / Folder Inputs */}
           <input
