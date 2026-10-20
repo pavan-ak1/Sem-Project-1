@@ -14,6 +14,8 @@ services:
       - PYTHONUNBUFFERED=1
       - DATA_ROOT=/data
       - MODEL_CHECKPOINT=/app/notebookV3/checkpoints/best_unet_kits23.pth
+      # Benchmark with backend.benchmark_inference before increasing this on 6 GB VRAM.
+      - INFERENCE_BATCH_SIZE=16
     volumes:
       # Mount KiTS23 dataset into container (Read-Only)
       - D:\archive:/data:ro

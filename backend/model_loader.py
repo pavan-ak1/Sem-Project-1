@@ -111,6 +111,11 @@ def get_device() -> torch.device:
                 # Test allocation on GPU to ensure driver and memory are operational
                 test_tensor = torch.zeros(1, device="cuda")
                 _device = torch.device("cuda")
+                # All inference inputs are 512 x 512, so cuDNN can safely select
+                # and cache its fastest convolution algorithms after warm-up.
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
                 gpu_name = torch.cuda.get_device_name(0)
                 print(f"[DEVICE] Hardware acceleration ACTIVE: GPU ({gpu_name})")
             except Exception as e:

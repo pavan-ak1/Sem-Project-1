@@ -58,6 +58,10 @@
 # Option C — Containerized Multi-Service Deployment (Docker Compose):
 # 1. GPU Mode (Uses NVIDIA GPU whenever available):
 #    docker compose up --build -d
+#    GPU benchmark (run inside the backend container after it is healthy):
+#    docker compose exec backend python -m backend.benchmark_inference --case-id case_00110 --tta --compare-fp32
+#    The report tests batch sizes 1, 2, 4, 8, and 16 and writes reports/inference_benchmark.json.
+#    To use a verified safe result, set INFERENCE_BATCH_SIZE=<batch-size> in docker-compose.yml and rebuild.
 #
 # 2. CPU Fallback Mode (For systems without NVIDIA GPU):
 #    docker compose -f docker-compose.cpu.yml up --build -d

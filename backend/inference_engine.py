@@ -3,7 +3,7 @@ import time
 import base64
 import logging
 from pathlib import Path
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,8 @@ MASK_DIR  = DATA_ROOT / "masks"
 CSV_PATH  = DATA_ROOT / "dataset.csv"
 UPLOADED_CASES_DIR = Path(os.getenv("UPLOADED_CASES_DIR", "uploaded_cases")).resolve()
 UPLOADED_CASES_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_GPU_BATCH_SIZE = 16
+DEFAULT_CPU_BATCH_SIZE = 4
 
 
 # Color constants normalized 0-255
@@ -219,21 +221,42 @@ def clean_segmentation_volume(raw_volume: np.ndarray) -> np.ndarray:
     return clean
 
 
+def get_inference_batch_size(device: torch.device) -> int:
+    """Return a validated, deployment-configurable batch size.
+
+    Sixteen is the established GPU batch size for this 512 x 512 model. Set
+    ``INFERENCE_BATCH_SIZE`` to a benchmarked value (for example, 8) when a
+    different GPU has less available VRAM.
+    """
+    default_size = DEFAULT_GPU_BATCH_SIZE if device.type == "cuda" else DEFAULT_CPU_BATCH_SIZE
+    raw_size = os.getenv("INFERENCE_BATCH_SIZE", str(default_size))
+    try:
+        batch_size = int(raw_size)
+    except ValueError:
+        logger.warning("Invalid INFERENCE_BATCH_SIZE=%r; using %d.", raw_size, default_size)
+        return default_size
+    return batch_size if batch_size > 0 else default_size
+
+
 def predict_tensor(
     model: torch.nn.Module,
     tensor: torch.Tensor,
     device: torch.device,
-    use_tta: bool = False
-) -> np.ndarray:
+    use_tta: bool = False,
+    return_numpy: bool = True,
+    use_amp: bool = True
+) -> Union[np.ndarray, torch.Tensor]:
     """
     Executes model forward pass with optional 4-Fold Test-Time Augmentation (TTA).
     tensor: (B, 1, 512, 512) float tensor in [0.0, 1.0].
-    Returns: (B, 512, 512) uint8 numpy array of class indices {0, 1, 2, 3}.
+    Returns a (B, 512, 512) uint8 mask with class indices {0, 1, 2, 3}.
+    ``return_numpy=False`` keeps that mask on the GPU so multi-slice callers
+    avoid a CPU/GPU synchronization after every batch.
     """
     with torch.inference_mode():
         if not use_tta:
             if device.type == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
+                with torch.amp.autocast(device_type="cuda", enabled=use_amp):
                     logits = model(tensor)
             else:
                 logits = model(tensor)
@@ -241,7 +264,7 @@ def predict_tensor(
         else:
             # 4-Fold Multi-Axis TTA: original, horizontal flip, vertical flip, and diagonal flip
             if device.type == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
+                with torch.amp.autocast(device_type="cuda", enabled=use_amp):
                     p1 = F.softmax(model(tensor), dim=1)
                     p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
                     p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
@@ -255,7 +278,60 @@ def predict_tensor(
             probs_avg = 0.25 * (p1 + p2 + p3 + p4)
             preds = torch.argmax(probs_avg, dim=1)
 
-    return preds.cpu().numpy().astype(np.uint8)
+    preds = preds.to(dtype=torch.uint8)
+    return preds.cpu().numpy() if return_numpy else preds
+
+
+def predict_volume_batched(
+    model: torch.nn.Module,
+    volume: np.ndarray,
+    device: torch.device,
+    use_tta: bool = False,
+    batch_size: Optional[int] = None,
+    use_amp: bool = True,
+    timing: Optional[Dict[str, float]] = None
+) -> np.ndarray:
+    """Predict an ordered (D, H, W) volume without per-batch GPU syncs."""
+    if volume.ndim != 3:
+        raise ValueError(f"Expected a (D, H, W) CT volume, got shape {volume.shape}.")
+
+    effective_batch_size = batch_size or get_inference_batch_size(device)
+    prediction_batches: List[torch.Tensor] = []
+    cuda_events = []
+
+    with torch.inference_mode():
+        for start in range(0, len(volume), effective_batch_size):
+            batch_np = np.ascontiguousarray(volume[start:start + effective_batch_size])
+            batch_tensor = torch.from_numpy(batch_np).unsqueeze(1)
+            if device.type == "cuda":
+                batch_tensor = batch_tensor.to(device, non_blocking=True)
+            else:
+                batch_tensor = batch_tensor.to(device)
+            if device.type == "cuda" and timing is not None:
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+            else:
+                start_time = time.perf_counter()
+            prediction_batches.append(
+                predict_tensor(
+                    model, batch_tensor, device, use_tta=use_tta,
+                    return_numpy=False, use_amp=use_amp
+                )
+            )
+            if device.type == "cuda" and timing is not None:
+                end_event.record()
+                cuda_events.append((start_event, end_event))
+            elif timing is not None:
+                timing["model_only_seconds"] = timing.get("model_only_seconds", 0.0) + (time.perf_counter() - start_time)
+
+    if not prediction_batches:
+        return np.empty((0, *volume.shape[1:]), dtype=np.uint8)
+    predictions = torch.cat(prediction_batches, dim=0).cpu().numpy()
+    if cuda_events:
+        torch.cuda.synchronize(device)
+        timing["model_only_seconds"] = sum(start.elapsed_time(end) for start, end in cuda_events) / 1000.0
+    return predictions
 
 
 def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = None) -> Dict[str, Any]:
@@ -365,19 +441,10 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
     if len(slices_list) == 0:
         raise ValueError(f"No image files found for case {case_id}")
 
-    # Batch model forward pass with adaptive TTA and cache-optimized batch size
+    # Ordered batched inference keeps compact uint8 masks on GPU until all
+    # batches complete, avoiding a synchronization for every CT batch.
     vol_3d_in = np.stack(slices_list, axis=0)  # (D, 512, 512)
-    preds_3d = []
-
-    batch_size = 16 if device.type == "cuda" else 4
-    with torch.inference_mode():
-        for i in range(0, len(vol_3d_in), batch_size):
-            batch_np = vol_3d_in[i:i + batch_size]
-            b_tensor = torch.from_numpy(batch_np).unsqueeze(1).to(device)
-            p_batch = predict_tensor(model, b_tensor, device, use_tta=use_tta)
-            preds_3d.append(p_batch)
-
-    raw_preds_3d = np.concatenate(preds_3d, axis=0)
+    raw_preds_3d = predict_volume_batched(model, vol_3d_in, device, use_tta=use_tta)
     kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
     clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
@@ -635,19 +702,9 @@ def run_uploaded_case_pipeline(
     if len(slices_list) == 0:
         raise ValueError("No valid image files found in the uploaded case folder.")
 
-    # Batch model forward pass with adaptive TTA and cache-optimized batch size
+    # Preserve natural z-order while batching and defer GPU-to-CPU mask transfer.
     vol_3d_in = np.stack(slices_list, axis=0)  # (D, 512, 512)
-    preds_3d = []
-    batch_size = 16 if device.type == "cuda" else 4
-
-    with torch.inference_mode():
-        for i in range(0, len(vol_3d_in), batch_size):
-            batch_np = vol_3d_in[i:i + batch_size]
-            b_tensor = torch.from_numpy(batch_np).unsqueeze(1).to(device)
-            p_batch = predict_tensor(model, b_tensor, device, use_tta=use_tta)
-            preds_3d.append(p_batch)
-
-    raw_preds_3d = np.concatenate(preds_3d, axis=0)
+    raw_preds_3d = predict_volume_batched(model, vol_3d_in, device, use_tta=use_tta)
     kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
     clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
