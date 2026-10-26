@@ -2,6 +2,7 @@ import os
 import sys
 import platform
 import pathlib
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -14,19 +15,20 @@ else:
 import pandas as pd
 from PIL import Image
 import numpy as np
+import torch
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 import json
 import anyio
+
+logger = logging.getLogger(__name__)
 
 from backend.schemas import (
     HealthResponse,
     PatientCaseSummary,
     SlicePredictionResponse,
-    Patient3DMetrics,
-    ClinicalReportResponse,
     CaseUploadResponse,
     CaseUploadSliceItem
 )
@@ -45,7 +47,9 @@ from backend.inference_engine import (
     IMAGE_DIR,
     MASK_DIR,
     CSV_PATH,
-    UPLOADED_CASES_DIR
+    UPLOADED_CASES_DIR,
+    SLICE_SUMMARY_OUTPUT_DIR,
+    CASE_BUNDLE_CACHE_DIR,
 )
 
 app = FastAPI(
@@ -66,10 +70,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Pre-load model weights into GPU VRAM on server boot."""
+    """Pre-load model weights into GPU VRAM on server boot and warm up cuDNN kernels."""
     try:
         model, device = load_model()
         print(f"[STARTUP] Residual U-Net successfully loaded on {device} (8.11M params).")
+        if device.type == "cuda":
+            with torch.inference_mode():
+                # Warm up batch size 4 (volume batch inference)
+                dummy_batch = torch.zeros((4, 1, 512, 512), device=device)
+                with torch.amp.autocast(device_type="cuda", enabled=True):
+                    _ = model(dummy_batch)
+                # Warm up batch size 1 (single-slice fast interactive preview)
+                dummy_single = torch.zeros((1, 1, 512, 512), device=device)
+                with torch.amp.autocast(device_type="cuda", enabled=True):
+                    _ = model(dummy_single)
+            torch.cuda.synchronize()
+            print("[STARTUP] GPU inference engine warmed up and cuDNN convolution kernels cached (B=1, B=4).")
     except Exception as e:
         print(f"[STARTUP WARNING] Model initialization postponed: {e}")
 
@@ -106,12 +122,9 @@ async def list_cases():
                     results.append(PatientCaseSummary(
                         case_id=m["case_id"],
                         slice_count=m["slices_analyzed"],
-                        has_tumor=m["vols"]["tumor_vol_cm3"] > 0,
-                        has_cyst=m["vols"]["cyst_vol_cm3"] > 0,
+                        has_tumor=any(s.get("has_tumor", False) for s in m.get("slices", [])),
+                        has_cyst=any(s.get("has_cyst", False) for s in m.get("slices", [])),
                         split="custom_upload",
-                        ai_kidney_vol_cm3=m["vols"]["total_parenchyma_vol_cm3"],
-                        ai_tumor_vol_cm3=m["vols"]["tumor_vol_cm3"],
-                        ai_tnm_stage=m["staging"]["tnm_t_stage"]
                     ))
                 except Exception:
                     pass
@@ -162,10 +175,9 @@ async def get_patient_case_full(case_id: str, tta: Optional[bool] = None):
     """
     try:
         bundle = await anyio.to_thread.run_sync(get_patient_case_full_bundle, case_id, tta)
-        if "metrics_3d" in bundle:
-            _case_3d_cache[case_id] = bundle["metrics_3d"]
         return JSONResponse(content=bundle)
     except Exception as e:
+        logger.exception("Full case bundle failed for %s", case_id)
         raise HTTPException(status_code=500, detail=f"Case full bundle error: {str(e)}")
 
 
@@ -212,10 +224,39 @@ async def get_case_slices(case_id: str, full: bool = False):
     }
 
 
+@app.get("/api/case/{case_id}/slice-summary.csv")
+async def download_slice_summary_csv(case_id: str):
+    """Download the already-generated, final-mask slice summary for one case."""
+    upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
+    if upload_meta.exists():
+        with open(upload_meta, "r", encoding="utf-8") as handle:
+            csv_value = json.load(handle).get("slice_summary_csv")
+        csv_path = Path(csv_value) if csv_value else UPLOADED_CASES_DIR / case_id / "reports" / f"{case_id}_slice_summary.csv"
+    else:
+        csv_path = SLICE_SUMMARY_OUTPUT_DIR / f"{case_id}_slice_summary.csv"
+
+    # If this is the first access, execute the normal case-bundle path once;
+    # it writes the summary while producing the masks used by the viewer.
+    if not csv_path.exists():
+        await anyio.to_thread.run_sync(get_patient_case_full_bundle, case_id)
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail=f"Slice summary is unavailable for case '{case_id}'.")
+    return FileResponse(csv_path, media_type="text/csv", filename=f"{case_id}_slice_summary.csv")
+
+
 @app.get("/api/case/{case_id}/slice/{slice_idx}")
 async def get_patient_slice_detail(case_id: str, slice_idx: int, tta: bool = False):
     """Fetches a specific patient slice with ground truth mask and live AI inference."""
-    # Fast path: check in-memory full case cache
+    # Fast path: check in-memory full case cache or L2 disk cache
+    if case_id not in _case_full_cache:
+        cache_file = CASE_BUNDLE_CACHE_DIR / f"{case_id}_full.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    _case_full_cache[case_id] = json.load(f)
+            except Exception:
+                pass
+
     if case_id in _case_full_cache:
         slices = _case_full_cache[case_id].get("slices", [])
         for s in slices:
@@ -277,6 +318,9 @@ async def get_patient_slice_detail(case_id: str, slice_idx: int, tta: bool = Fal
     infer_res["case_id"] = case_id
     infer_res["slice_index"] = slice_idx
     infer_res["filename"] = fname
+    if "slice_summary" in infer_res and isinstance(infer_res["slice_summary"], dict):
+        infer_res["slice_summary"]["case_id"] = case_id
+        infer_res["slice_summary"]["slice_index"] = slice_idx
 
     return infer_res
 
@@ -330,97 +374,6 @@ async def get_uploaded_slice(case_id: str, slice_idx: int):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-_case_3d_cache: Dict[str, Any] = {}
-
-
-@app.get("/api/case/{case_id}/metrics")
-async def get_case_metrics(case_id: str):
-    """Retrieves cached 3D metrics if available, or returns 404."""
-    upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
-    if upload_meta.exists():
-        with open(upload_meta, "r", encoding="utf-8") as f:
-            return JSONResponse(content=json.load(f))
-    if case_id in _case_3d_cache:
-        return JSONResponse(content=_case_3d_cache[case_id])
-    return JSONResponse(content={"status": "not_computed", "case_id": case_id}, status_code=404)
-
-
-@app.post("/api/predict/case/{case_id}")
-async def predict_case_3d(case_id: str, tta: Optional[bool] = None):
-    """Executes full 3D patient volume reconstruction, morphometry, and TNM staging (adaptive TTA)."""
-    upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
-    if upload_meta.exists():
-        with open(upload_meta, "r", encoding="utf-8") as f:
-            m = json.load(f)
-        return JSONResponse(content={
-            "case_id": case_id,
-            "slices_analyzed": m["slices_analyzed"],
-            "right_kidney_vol_cm3": m["vols"]["right_kidney_vol_cm3"],
-            "left_kidney_vol_cm3": m["vols"]["left_kidney_vol_cm3"],
-            "total_parenchyma_vol_cm3": m["vols"]["total_parenchyma_vol_cm3"],
-            "tumor_vol_cm3": m["vols"]["tumor_vol_cm3"],
-            "cyst_vol_cm3": m["vols"]["cyst_vol_cm3"],
-            "tumor_burden_pct": m["vols"]["tumor_burden_pct"],
-            "length_cm": m["pca"]["length_cm"],
-            "width_cm": m["pca"]["width_cm"],
-            "thickness_cm": m["pca"]["thickness_cm"],
-            "ellipsoid_vol_cm3": m["pca"]["ellipsoid_vol_cm3"],
-            "ellipsoid_error_pct": m["pca"]["ellipsoid_error_pct"],
-            "tnm_stage": m["staging"]["tnm_t_stage"],
-            "surgical_recommendation": m["staging"]["surgical_recommendation"],
-            "inference_time_sec": m.get("inference_time_sec", 1.0),
-            "report_markdown": m["report_markdown"]
-        })
-
-    if case_id in _case_3d_cache:
-        return JSONResponse(content=_case_3d_cache[case_id])
-
-    try:
-        metrics = await anyio.to_thread.run_sync(run_patient_case_inference, case_id, tta)
-        _case_3d_cache[case_id] = metrics
-        return JSONResponse(content=metrics)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"3D Case inference error: {str(e)}")
-
-
-@app.get("/api/report/{case_id}", response_model=ClinicalReportResponse)
-async def get_clinical_report(case_id: str):
-    """Fetches or generates clinical radiology decision support report."""
-    upload_meta = UPLOADED_CASES_DIR / case_id / "meta.json"
-    if upload_meta.exists():
-        with open(upload_meta, "r", encoding="utf-8") as f:
-            m = json.load(f)
-        return ClinicalReportResponse(
-            case_id=case_id,
-            markdown_content=m["report_markdown"],
-            structured_json=m
-        )
-
-    md_path = Path(f"notebookV3/reports/{case_id}_clinical_report.md")
-    json_path = Path(f"notebookV3/reports/{case_id}_clinical_report.json")
-
-    if md_path.exists():
-        with open(md_path, "r", encoding="utf-8") as f:
-            md_content = f.read()
-        struct_json = {}
-        if json_path.exists():
-            with open(json_path, "r", encoding="utf-8") as jf:
-                struct_json = json.load(jf)
-        return ClinicalReportResponse(
-            case_id=case_id,
-            markdown_content=md_content,
-            structured_json=struct_json
-        )
-
-    # If report file doesn't exist yet, run on-demand inference
-    res = run_patient_case_inference(case_id)
-    return ClinicalReportResponse(
-        case_id=case_id,
-        markdown_content=res["report_markdown"],
-        structured_json=res
-    )
 
 
 # ==============================================================================

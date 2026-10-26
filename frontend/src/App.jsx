@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Activity,
   Layers,
@@ -8,10 +8,7 @@ import {
   ChevronRight,
   Upload,
   FileText,
-  ShieldCheck,
   Cpu,
-  BarChart2,
-  Maximize2,
   Download,
   Copy,
   Check,
@@ -19,17 +16,22 @@ import {
   RotateCw,
   Eye,
   Sliders,
-  Folder,
-  FolderPlus
+  FolderPlus,
+  Search
 } from 'lucide-react';
 import './App.css';
+import SliceAnalysisPanel from './components/SliceAnalysisPanel';
+import ScanWideOverview from './components/ScanWideOverview';
 
 export default function App() {
   // Navigation & View State
   const [activeTab, setActiveTab] = useState('explorer'); // 'explorer' | 'upload'
   const [health, setHealth] = useState(null);
   const [cases, setCases] = useState([]);
-  const [selectedCaseId, setSelectedCaseId] = useState('case_00110');
+  const [searchQuery, setSearchQuery] = useState('');
+  // Wait for /api/cases before choosing a study. A hard-coded initial ID caused
+  // two whole-volume /full requests to start concurrently on first load.
+  const [selectedCaseId, setSelectedCaseId] = useState(null);
   
   // Slice Viewer State
   const [sliceIndex, setSliceIndex] = useState(15);
@@ -46,9 +48,13 @@ export default function App() {
   const [maskOverlayUrl, setMaskOverlayUrl] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // 3D Case Analytics State
-  const [metrics3D, setMetrics3D] = useState(null);
-  const [isComputing3D, setIsComputing3D] = useState(false);
+  // Filtered cases for study tray search
+  const filteredCases = useMemo(() => {
+    if (!searchQuery.trim()) return cases;
+    const q = searchQuery.toLowerCase().trim();
+    return cases.filter(c => c.case_id.toLowerCase().includes(q));
+  }, [cases, searchQuery]);
+
 
   // Upload State (Supports both Whole Case Folder & Single CT Slice)
   const [uploadMode, setUploadMode] = useState('case'); // 'case' | 'slice'
@@ -92,9 +98,12 @@ export default function App() {
       .catch(err => console.error("Fetch cases error:", err));
   }, []);
 
-  // 2. Fetch Entire Case Bundle at once (Batch-computed slices + 3D metrics)
+  // 2. Fetch Entire Case Bundle at once (Batch-computed slices)
   useEffect(() => {
     if (!selectedCaseId) return;
+
+    let active = true;
+    const controller = new AbortController();
 
     // Check client-side memory cache first for immediate zero-latency load
     if (caseCacheRef.current[selectedCaseId]) {
@@ -111,9 +120,6 @@ export default function App() {
       if (slices[initialIdx]) {
         setSliceData(slices[initialIdx]);
       }
-      if (cached.metrics_3d) {
-        setMetrics3D(cached.metrics_3d);
-      }
       setLoadingCase(false);
       setLoadingSlice(false);
       return;
@@ -121,55 +127,84 @@ export default function App() {
 
     setLoadingCase(true);
     setLoadingSlice(true);
-    setSliceData(null);
     setCaseSlices([]);
 
-    fetch(`/api/case/${selectedCaseId}/full`)
+    const caseMeta = cases.find(c => c.case_id === selectedCaseId);
+    const estTotal = caseMeta?.slice_count || totalSlices || 50;
+    setTotalSlices(estTotal);
+    const initialIdx = Math.floor(estTotal / 2);
+    setSliceIndex(initialIdx);
+
+    // Fast Path 1: Immediately fetch initial single slice preview (resolves in ~150ms)
+    fetch(`/api/case/${selectedCaseId}/slice/${initialIdx}`, { signal: controller.signal })
+      .then(res => {
+        if (!res.ok) throw new Error(`Status ${res.status}`);
+        return res.json();
+      })
+      .then(initialSlice => {
+        if (!active) return;
+        setSliceData(prev => {
+          if (caseCacheRef.current[selectedCaseId]) return prev;
+          return initialSlice;
+        });
+        setLoadingSlice(false);
+      })
+      .catch(err => {
+        if (err.name === 'AbortError') return;
+        console.debug("Initial slice preview notice:", err);
+      });
+
+    // Fast Path 2: Concurrently fetch full case bundle for complete volume navigation
+    fetch(`/api/case/${selectedCaseId}/full`, { signal: controller.signal })
       .then(res => {
         if (!res.ok) throw new Error(`Status ${res.status}`);
         return res.json();
       })
       .then(data => {
+        if (!active) return;
         if (data && data.slices && data.slices.length > 0) {
           caseCacheRef.current[selectedCaseId] = data;
           setCaseSlices(data.slices);
           const total = data.total_slices || data.slices.length;
           setTotalSlices(total);
 
-          const tumorIdx = data.slices.findIndex(s => (s.tumor_area_cm2 > 0) || (s.pixel_counts && s.pixel_counts.tumor > 0));
-          const initialIdx = (tumorIdx !== -1) ? tumorIdx : Math.floor(total / 2);
-          setSliceIndex(initialIdx);
-          setSliceData(data.slices[initialIdx]);
-
-          if (data.metrics_3d) {
-            setMetrics3D(data.metrics_3d);
-          }
+          // If on initial middle slice, jump to prominent tumor slice if detected
+          setSliceIndex(prevIdx => {
+            const tumorIdx = data.slices.findIndex(s => (s.tumor_area_cm2 > 0) || (s.pixel_counts && s.pixel_counts.tumor > 0));
+            const targetIdx = (prevIdx === initialIdx && tumorIdx !== -1) ? tumorIdx : prevIdx;
+            const targetSlice = data.slices[targetIdx] || data.slices.find(s => s.slice_index === targetIdx) || data.slices[0];
+            if (targetSlice) {
+              setSliceData(targetSlice);
+            }
+            return targetIdx;
+          });
         }
         setLoadingCase(false);
         setLoadingSlice(false);
       })
       .catch(err => {
+        if (err.name === 'AbortError') return;
+        if (!active) return;
         console.warn("Full case fetch fallback:", err);
-        fetch(`/api/case/${selectedCaseId}/slices`)
+        fetch(`/api/case/${selectedCaseId}/slices`, { signal: controller.signal })
           .then(res => res.json())
           .then(data => {
+            if (!active) return;
             if (data && data.slices) {
               setTotalSlices(data.total_slices);
-              setSliceIndex(Math.floor(data.total_slices / 2));
             }
             setLoadingCase(false);
           })
-          .catch(() => setLoadingCase(false));
-
-        fetch(`/api/case/${selectedCaseId}/metrics`)
-          .then(res => (res.ok ? res.json() : null))
-          .then(cached => {
-            if (cached && cached.tnm_stage) setMetrics3D(cached);
-            else setMetrics3D(null);
-          })
-          .catch(() => setMetrics3D(null));
+          .catch(() => {
+            if (active) setLoadingCase(false);
+          });
       });
-  }, [selectedCaseId]);
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [selectedCaseId, cases]);
 
   // 3. Instant Slice Navigation (Displays suddenly from in-memory case data with ZERO server roundtrip)
   useEffect(() => {
@@ -183,20 +218,31 @@ export default function App() {
     }
 
     // Fallback: only if whole-case bundle is not yet loaded in memory
-    if (selectedCaseId && !loadingCase) {
+    let active = true;
+    const controller = new AbortController();
+
+    if (selectedCaseId && (!caseSlices || caseSlices.length === 0)) {
       setLoadingSlice(true);
-      fetch(`/api/case/${selectedCaseId}/slice/${sliceIndex}`)
+      fetch(`/api/case/${selectedCaseId}/slice/${sliceIndex}`, { signal: controller.signal })
         .then(res => res.json())
         .then(data => {
+          if (!active) return;
           setSliceData(data);
           setLoadingSlice(false);
         })
         .catch(err => {
+          if (err.name === 'AbortError') return;
+          if (!active) return;
           console.error("Error fetching slice fallback:", err);
           setLoadingSlice(false);
         });
     }
-  }, [selectedCaseId, sliceIndex, caseSlices, loadingCase]);
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [selectedCaseId, sliceIndex, caseSlices]);
 
   // 4. Cine Loop Playback (Fluid 60fps playback from RAM)
   useEffect(() => {
@@ -212,14 +258,18 @@ export default function App() {
   // Build a transparent colour layer from the class-mask so each anatomy
   // control can be toggled independently over the unchanged CT image.
   useEffect(() => {
-    if (!sliceData || viewMode === 'pure_ct' || viewMode === 'split') {
+    const activeTargetSlice = (activeTab === 'explorer')
+      ? sliceData
+      : (singleSliceResult || uploadedSliceDetail);
+
+    if (!activeTargetSlice || viewMode === 'pure_ct' || viewMode === 'split') {
       setMaskOverlayUrl(null);
       return undefined;
     }
 
     const maskSource = viewMode === 'gt_overlay'
-      ? sliceData.ground_truth_mask
-      : sliceData.predicted_mask;
+      ? (activeTargetSlice.ground_truth_mask || activeTargetSlice.predicted_mask)
+      : activeTargetSlice.predicted_mask;
     if (!maskSource) {
       setMaskOverlayUrl(null);
       return undefined;
@@ -263,12 +313,21 @@ export default function App() {
     maskImage.src = maskSource;
 
     return () => { cancelled = true; };
-  }, [sliceData, viewMode, visibleLayers]);
+  }, [sliceData, singleSliceResult, uploadedSliceDetail, activeTab, viewMode, visibleLayers]);
 
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (activeTab !== 'explorer') return;
+      const target = e.target;
+      const isFormElement = target && (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
+      );
+      if (isFormElement) return;
+
       if (e.key === 'ArrowRight') {
         setSliceIndex(prev => Math.min(totalSlices - 1, prev + 1));
       } else if (e.key === 'ArrowLeft') {
@@ -282,20 +341,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [totalSlices, activeTab]);
 
-  // 5. Trigger 3D Patient Reconstruction
-  const trigger3DReconstruction = (cid) => {
-    setIsComputing3D(true);
-    fetch(`/api/predict/case/${cid}`, { method: 'POST' })
-      .then(res => res.json())
-      .then(data => {
-        setMetrics3D(data);
-        setIsComputing3D(false);
-      })
-      .catch(err => {
-        console.error("3D analysis error:", err);
-        setIsComputing3D(false);
-      });
-  };
 
   // 6. Drag & Drop Directory / File Traversal
   const extractFilesFromDataTransfer = async (items) => {
@@ -469,10 +514,14 @@ export default function App() {
           fetchUploadedSlice(data.case_id, data.best_preview_slice);
         }
 
-        // Refresh cohort cases so uploaded case is available in main explorer
+        // Refresh cohort cases in background so uploaded case is available in studies tray,
+        // but stay on upload tab so the user sees the result right in Drag & Drop view
         fetch('/api/cases')
           .then(r => r.json())
-          .then(cList => setCases(cList))
+          .then(cList => {
+            setCases(cList);
+            setSelectedCaseId(data.case_id);
+          })
           .catch(e => console.error(e));
       })
       .catch(err => {
@@ -514,10 +563,45 @@ export default function App() {
         return res.json();
       })
       .then(data => {
+        data.filename = file.name;
+        const cid = file.name.replace(/\.[^/.]+$/, "");
+        data.case_id = cid;
+        data.slice_index = 0;
         setSingleSliceResult(data);
         setIsUploading(false);
         setUploadProgressText('');
         setUploadPreviewUrl(null);
+
+        // Pre-populate client case cache for instant exploration
+        caseCacheRef.current[cid] = {
+          case_id: cid,
+          total_slices: 1,
+          slices: [data],
+          slice_summary: data.slice_summary ? [data.slice_summary] : []
+        };
+        // Register in studies tray
+        setCases(prev => {
+          if (prev.some(c => c.case_id === cid)) return prev;
+          return [
+            {
+              case_id: cid,
+              slice_count: 1,
+              has_tumor: Boolean(data.slice_summary?.tumor_detected || (data.pixel_counts?.tumor > 0)),
+              has_cyst: Boolean(data.slice_summary?.cyst_detected || (data.pixel_counts?.cyst > 0)),
+              split: 'custom_upload'
+            },
+            ...prev
+          ];
+        });
+
+        // If user was on explorer tab when uploading, immediately activate this slice study
+        if (activeTab === 'explorer') {
+          setSelectedCaseId(cid);
+          setSliceIndex(0);
+          setTotalSlices(1);
+          setSliceData(data);
+          setCaseSlices([data]);
+        }
       })
       .catch(err => {
         console.error("Single slice upload error:", err);
@@ -573,6 +657,17 @@ export default function App() {
     setActiveTab('explorer');
   };
 
+  const openSingleSliceInExplorer = () => {
+    if (!singleSliceResult) return;
+    const cid = singleSliceResult.case_id || 'custom_slice';
+    setSelectedCaseId(cid);
+    setSliceIndex(0);
+    setTotalSlices(1);
+    setSliceData(singleSliceResult);
+    setCaseSlices([singleSliceResult]);
+    setActiveTab('explorer');
+  };
+
   const openUploadedReport = () => {
     if (!uploadedCaseResult) return;
     setReportMarkdown(uploadedCaseResult.report_markdown);
@@ -597,7 +692,28 @@ export default function App() {
   };
 
   return (
-    <div className="app-container">
+    <div
+      className="app-container"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragActive(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+          setDragActive(false);
+        }
+      }}
+      onDrop={handleDrop}
+    >
+      {dragActive && (
+        <div className="global-drop-overlay">
+          <div className="global-drop-card glass-panel">
+            <Upload size={48} color="var(--accent-primary)" className="bounce-subtle" />
+            <h3>Drop CT Scan File or Study Folder Here</h3>
+            <p>Instant Residual U-Net AI Segmentation & Slice Prediction Summary</p>
+          </div>
+        </div>
+      )}
       {/* --- TOP HEADER BAR --- */}
       <header className="app-header">
         <div className="brand-section">
@@ -639,10 +755,6 @@ export default function App() {
             <div className="pulse-dot" />
             <span>{health ? `${health.device.toUpperCase()} Acceleration` : 'Connecting...'}</span>
           </div>
-          <button className="btn-secondary" onClick={openReportModal}>
-            <FileText size={15} />
-            Clinical Report
-          </button>
         </div>
       </header>
 
@@ -689,30 +801,58 @@ export default function App() {
                 <Upload size={16} />
               </button>
             </div>
-            <div className="tray-search">Search studies</div>
-            <div className="tray-section-label">AVAILABLE CASES</div>
-            <div className="tray-case-list">
-              {cases.map((c, index) => (
+            <div className="tray-search-box">
+              <Search size={13} className="tray-search-icon" />
+              <input
+                type="text"
+                placeholder="Search studies…"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="tray-search-input"
+                aria-label="Search studies"
+              />
+              {searchQuery && (
                 <button
-                  key={c.case_id}
-                  className={`tray-case ${selectedCaseId === c.case_id ? 'selected' : ''}`}
-                  onClick={() => {
-                    if (c.case_id !== selectedCaseId) {
-                      setLoadingCase(true);
-                      setLoadingSlice(true);
-                      setSliceData(null);
-                      setSelectedCaseId(c.case_id);
-                    }
-                  }}
+                  type="button"
+                  className="tray-search-clear"
+                  onClick={() => setSearchQuery('')}
+                  aria-label="Clear search"
                 >
-                  <span className="tray-case-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="tray-case-content">
-                    <strong>{c.case_id}</strong>
-                    <small>{c.slice_count} slices · {c.has_tumor ? 'Finding detected' : 'Review pending'}</small>
-                  </span>
-                  {c.has_tumor && <span className="tray-case-dot" />}
+                  ×
                 </button>
-              ))}
+              )}
+            </div>
+            <div className="tray-section-label">
+              AVAILABLE CASES {searchQuery && `(${filteredCases.length})`}
+            </div>
+            <div className="tray-case-list">
+              {filteredCases.length === 0 ? (
+                <div className="tray-no-results">
+                  <span>No studies match &ldquo;{searchQuery}&rdquo;</span>
+                </div>
+              ) : (
+                filteredCases.map((c, index) => (
+                  <button
+                    key={c.case_id}
+                    className={`tray-case ${selectedCaseId === c.case_id ? 'selected' : ''}`}
+                    onClick={() => {
+                      if (c.case_id !== selectedCaseId) {
+                        setLoadingCase(true);
+                        setLoadingSlice(true);
+                        setSliceData(null);
+                        setSelectedCaseId(c.case_id);
+                      }
+                    }}
+                  >
+                    <span className="tray-case-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="tray-case-content">
+                      <strong>{c.case_id}</strong>
+                      <small>{c.slice_count} slices · {c.has_tumor ? 'Finding detected' : 'Review pending'}</small>
+                    </span>
+                    {c.has_tumor && <span className="tray-case-dot" />}
+                  </button>
+                ))
+              )}
             </div>
             <div className="tray-footer">
               <div className="tray-footer-label">WORKSPACE</div>
@@ -833,6 +973,12 @@ export default function App() {
                       </>
                     )
                   )}
+                  {!sliceData && !loadingCase && (
+                    <div className="viewport-empty-state" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 320, color: 'var(--text-muted)' }}>
+                      <Layers size={42} style={{ opacity: 0.35, marginBottom: 8 }} />
+                      <span style={{ fontSize: '0.85rem' }}>No slice data available for this position</span>
+                    </div>
+                  )}
                   {loadingSlice && (
                     <div style={{ position: 'absolute', bottom: 12, right: 12, background: 'rgba(0,0,0,0.7)', padding: '4px 8px', borderRadius: 4, fontSize: '0.7rem' }}>
                       Inference active...
@@ -931,202 +1077,57 @@ export default function App() {
             </div>
           </section>
 
-          {/* RIGHT: QUANTITATIVE ANALYTICS & CLINICAL STAGING */}
-          <section className="analytics-panel">
-            {/* AJCC TNM Staging Card */}
-            <div className="glass-panel staging-card">
-              <div className="card-title-row">
-                <div className="card-title">
-                  <ShieldCheck size={18} color="var(--accent-primary)" />
-                  AJCC 8th Edition Clinical Staging
-                </div>
-                {loadingCase ? (
-                  <span className="badge badge-cyan" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                    <RotateCw size={11} className="spin" /> Loading Image...
-                  </span>
-                ) : metrics3D && (
-                  <span className="badge badge-cyan">
-                    {metrics3D.inference_time_sec}s 3D Inference
-                  </span>
-                )}
-              </div>
+          {/* RIGHT: INTEGRATED SLICE ANALYSIS PANEL */}
+          <SliceAnalysisPanel
+            selectedCaseId={selectedCaseId}
+            sliceIndex={sliceIndex}
+            totalSlices={totalSlices}
+            sliceData={sliceData}
+            loadingCase={loadingCase}
+            loadingSlice={loadingSlice}
+          />
 
-              {loadingCase ? (
-                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>
-                  <RotateCw size={22} className="spin" color="var(--accent-primary)" style={{ margin: '0 auto 8px' }} />
-                  <div style={{ fontWeight: 600, color: 'var(--text-white)' }}>
-                    Reconstructing 3D Volume...
-                  </div>
-                  <div style={{ fontSize: '0.78rem', marginTop: 4 }}>
-                    Analyzing anatomy for {selectedCaseId}
-                  </div>
-                </div>
-              ) : metrics3D ? (
-                <>
-                  <div className="tnm-banner">
-                    <div className={`stage-badge-large ${metrics3D.tnm_stage === 'cT1a' ? 'stage-badge-t1' : ''}`}>
-                      {metrics3D.tnm_stage}
-                    </div>
-                    <div className="stage-info">
-                      <div className="stage-headline">
-                        Clinical Stage: {metrics3D.tnm_stage}
-                      </div>
-                      <div className="stage-detail">
-                        Maximum 3D Euclidean Diameter: <strong>{metrics3D.gt_comparison ? metrics3D.gt_comparison.gt_d_max_cm : metrics3D.width_cm} cm</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="surgical-box">
-                    <strong>Surgical Guidance:</strong> {metrics3D.surgical_recommendation}
-                  </div>
-                </>
-              ) : (
-                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>
-                  {isComputing3D ? "Reconstructing 3D Volume..." : "Click below to compute 3D Clinical Staging."}
-                </div>
-              )}
-            </div>
-
-            {/* 3D Volumetrics Card */}
-            <div className="glass-panel volumetrics-card">
-              <div className="card-title-row">
-                <div className="card-title">
-                  <BarChart2 size={18} color="var(--color-kidney)" />
-                  Physical Volumetrics (cm³ / mL)
-                </div>
-                <button
-                  className="btn-primary"
-                  style={{ fontSize: '0.775rem', padding: '5px 10px' }}
-                  onClick={() => trigger3DReconstruction(selectedCaseId)}
-                  disabled={isComputing3D}
-                >
-                  <RotateCw size={13} className={isComputing3D ? 'animate-spin' : ''} />
-                  {isComputing3D ? "Reconstructing..." : (metrics3D ? "Recompute 3D" : "Compute 3D")}
-                </button>
-              </div>
-
-              {metrics3D && (
-                <>
-                  <div className="metric-grid-4">
-                    <div className="metric-tile tile-kidney">
-                      <span className="tile-label">Right Kidney</span>
-                      <span className="tile-value">{metrics3D.right_kidney_vol_cm3}</span>
-                      <span className="tile-sub">cm³ functional parenchyma</span>
-                    </div>
-
-                    <div className="metric-tile tile-kidney">
-                      <span className="tile-label">Left Kidney</span>
-                      <span className="tile-value">{metrics3D.left_kidney_vol_cm3}</span>
-                      <span className="tile-sub">cm³ functional parenchyma</span>
-                    </div>
-
-                    <div className="metric-tile tile-tumor">
-                      <span className="tile-label">Renal Neoplasm</span>
-                      <span className="tile-value" style={{ color: '#F87171' }}>{metrics3D.tumor_vol_cm3}</span>
-                      <span className="tile-sub">
-                        {metrics3D.gt_comparison ? `GT: ${metrics3D.gt_comparison.gt_tumor_vol_cm3} cm³` : 'Solid Tumor Volume'}
-                      </span>
-                    </div>
-
-                    <div className="metric-tile tile-cyst">
-                      <span className="tile-label">Renal Cyst</span>
-                      <span className="tile-value" style={{ color: '#60A5FA' }}>{metrics3D.cyst_vol_cm3}</span>
-                      <span className="tile-sub">Benign cystic volume</span>
-                    </div>
-                  </div>
-
-                  {/* Tumor Burden Bar */}
-                  <div style={{ marginTop: '8px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 600 }}>
-                      <span style={{ color: 'var(--text-muted)' }}>ORGAN TUMOR BURDEN:</span>
-                      <span style={{ color: '#F87171', fontFamily: 'var(--font-mono)' }}>
-                        {metrics3D.tumor_burden_pct}%
-                      </span>
-                    </div>
-                    <div className="progress-track">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${Math.min(100, metrics3D.tumor_burden_pct)}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Ground Truth Agreement Pill */}
-                  {metrics3D.gt_comparison && (
-                    <div style={{ marginTop: '14px', background: 'var(--bg-surface-elevated)', padding: '10px', borderRadius: 8, fontSize: '0.75rem', display: 'flex', justifyContent: 'space-between' }}>
-                      <span><strong>Kidney Dice:</strong> {metrics3D.gt_comparison.dice_kidney}</span>
-                      <span><strong>Tumor Dice:</strong> {metrics3D.gt_comparison.dice_tumor}</span>
-                      <span><strong>Cyst Dice:</strong> {metrics3D.gt_comparison.dice_cyst}</span>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* 3D PCA Morphometry Card */}
-            <div className="glass-panel pca-card">
-              <div className="card-title-row">
-                <div className="card-title">
-                  <Cpu size={18} color="var(--accent-amber)" />
-                  3D PCA Renal Calipers & Traditional Ellipsoid Error
-                </div>
-              </div>
-
-              {metrics3D && (
-                <>
-                  <div className="pca-grid">
-                    <div className="pca-box">
-                      <div className="pca-axis-name">Length (L)</div>
-                      <div className="pca-axis-val">{metrics3D.length_cm} cm</div>
-                    </div>
-                    <div className="pca-box">
-                      <div className="pca-axis-name">Width (W)</div>
-                      <div className="pca-axis-val">{metrics3D.width_cm} cm</div>
-                    </div>
-                    <div className="pca-box">
-                      <div className="pca-axis-name">Thickness (T)</div>
-                      <div className="pca-axis-val">{metrics3D.thickness_cm} cm</div>
-                    </div>
-                  </div>
-
-                  <div className="citation-note">
-                    <strong>Koukoutegos et al. (2024) Audit:</strong> Manual prolate ellipsoid approximation ({metrics3D.ellipsoid_vol_cm3} cm³) overestimates true 3D volume by <strong>+{metrics3D.ellipsoid_error_pct}%</strong> due to the non-elliptical renal hilum.
-                  </div>
-                </>
-              )}
-            </div>
-          </section>
+          {/* BOTTOM: UNIFIED SCAN-WIDE ANALYSIS */}
+          <ScanWideOverview
+            selectedCaseId={selectedCaseId}
+            caseSlices={caseSlices}
+            sliceIndex={sliceIndex}
+            setSliceIndex={setSliceIndex}
+            totalSlices={totalSlices}
+            loadingCase={loadingCase}
+          />
           </main>
         </div>
         )
       ) : (
         /* --- DUAL MODE UPLOAD VIEW: WHOLE CASE FOLDER & SINGLE CT SLICE --- */
-        <main className="upload-container">
-          {/* Mode Switcher Tabs */}
-          <div className="upload-mode-selector">
-            <button
-              className={`upload-mode-pill ${uploadMode === 'case' ? 'active' : ''}`}
-              onClick={() => {
-                setUploadMode('case');
-                setSingleSliceResult(null);
-              }}
-            >
-              <FolderPlus size={16} />
-              <span>Whole Case Folder (3D Volumetric Pipeline)</span>
-            </button>
-            <button
-              className={`upload-mode-pill ${uploadMode === 'slice' ? 'active' : ''}`}
-              onClick={() => {
-                setUploadMode('slice');
-                setUploadedCaseResult(null);
-                setUploadedSliceDetail(null);
-              }}
-            >
-              <Upload size={16} />
-              <span>Single CT Slice (2D Instant Segmentation)</span>
-            </button>
-          </div>
+        <main className={`upload-container ${(uploadedCaseResult || singleSliceResult) ? 'has-result' : ''}`}>
+          {/* Mode Switcher Tabs - Only visible during upload selection */}
+          {(!uploadedCaseResult && !singleSliceResult) && (
+            <div className="upload-mode-selector">
+              <button
+                className={`upload-mode-pill ${uploadMode === 'case' ? 'active' : ''}`}
+                onClick={() => {
+                  setUploadMode('case');
+                  setSingleSliceResult(null);
+                }}
+              >
+                <FolderPlus size={16} />
+                <span>Whole Case Folder (3D Volumetric Pipeline)</span>
+              </button>
+              <button
+                className={`upload-mode-pill ${uploadMode === 'slice' ? 'active' : ''}`}
+                onClick={() => {
+                  setUploadMode('slice');
+                  setUploadedCaseResult(null);
+                  setUploadedSliceDetail(null);
+                }}
+              >
+                <Upload size={16} />
+                <span>Single CT Slice (2D Instant Segmentation)</span>
+              </button>
+            </div>
+          )}
 
           {(health && !health.model_loaded) && (
             <div className="analysis-unavailable" role="status">
@@ -1253,275 +1254,285 @@ export default function App() {
           )}
 
           {/* ============================================================================== */}
-          {/* WHOLE CASE UPLOAD RESULTS DASHBOARD */}
+          {/* WHOLE CASE UPLOAD RESULTS DASHBOARD: MATCHES COHORT CASE EXPLORER */}
           {/* ============================================================================== */}
           {uploadedCaseResult && (
-            <div className="glass-panel uploaded-case-card">
-              {/* Header with Case Metadata, Staging & Surgical Guidance */}
+            <div className="uploaded-case-card glass-panel">
+              {/* Header with Case Metadata & Actions */}
               <div className="uploaded-case-header">
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-white)', margin: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-white)', margin: 0 }}>
                       Patient Case: {uploadedCaseResult.case_id}
                     </h2>
-                    <span className="badge badge-emerald">Custom Uploaded Case</span>
-                    <span className="badge badge-cyan">{uploadedCaseResult.slices_analyzed} Slices Analyzed</span>
+                    <span className="badge badge-emerald">3D Volume</span>
+                    <span className="badge badge-cyan">{uploadedCaseResult.slices_analyzed} Slices</span>
+                    <span className="badge badge-cyan">{uploadedCaseResult.inference_time_sec}s Latency</span>
                   </div>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
-                    Inference & 3D Volumetrics Latency: <strong>{uploadedCaseResult.inference_time_sec}s</strong> (FP16 AMP Tensor Core Accelerated)
-                  </span>
                 </div>
 
-                <div style={{ display: 'flex', gap: 10 }}>
-                  <button className="btn-primary" onClick={openUploadedReport}>
-                    <FileText size={15} /> View Formal Report
-                  </button>
-                  <button className="btn-secondary" onClick={openUploadedInExplorer}>
-                    <Eye size={15} /> Open in 3D Explorer
-                  </button>
-                  <button className="btn-secondary" onClick={() => { setUploadedCaseResult(null); setUploadedSliceDetail(null); }}>
-                    <RotateCw size={15} /> Upload Another
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button className="btn-secondary" style={{ padding: '5px 12px', fontSize: '0.78rem' }} onClick={() => { setUploadedCaseResult(null); setUploadedSliceDetail(null); }}>
+                    <RotateCw size={13} /> Upload Another Case
                   </button>
                 </div>
               </div>
 
-              {/* TNM Stage & Surgical Guidance Banner */}
-              <div className="tnm-banner">
-                <div className={`stage-badge-large ${uploadedCaseResult.tnm_stage.startsWith('cT1') ? 'stage-badge-t1' : ''}`}>
-                  {uploadedCaseResult.tnm_stage}
-                </div>
-                <div className="stage-info">
-                  <div className="stage-headline">
-                    AJCC / UICC 8th Edition Clinical Staging
+              {/* Two-Column Clinical Workspace: Left Primary CT Viewer, Right Slice Prediction Summary */}
+              <div className="main-layout" style={{ maxWidth: '100%', width: '100%', padding: 0, margin: 0 }}>
+                {/* LEFT: CT VIEWER PANEL */}
+                <section className="glass-panel viewer-panel">
+                  <div className="viewer-header">
+                    <div className="viewer-study-meta">
+                      <div className="viewer-overline">AXIAL CT / WHOLE CASE SERIES</div>
+                      <div className="viewer-case-name">{uploadedCaseResult.case_id}</div>
+                      {loadingUploadedSlice && (
+                        <span className="viewer-loading">
+                          <RotateCw size={12} className="spin" /> Updating slice
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div className="stage-detail">
-                    {uploadedCaseResult.surgical_recommendation}
-                  </div>
-                </div>
-              </div>
 
-              {/* Interactive Axial Slice Navigator for Uploaded Case */}
-              <div className="uploaded-navigator-box">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <Layers size={18} color="var(--accent-primary)" />
-                    <span style={{ fontWeight: 700, color: 'var(--text-white)' }}>
-                      Axial Slice Inspection: Slice {uploadedCaseSliceIndex + 1} of {uploadedCaseResult.slices_analyzed}
-                    </span>
-                    {uploadedCaseSliceIndex === uploadedCaseResult.best_preview_slice && (
-                      <span className="badge badge-amber" style={{ fontSize: '0.7rem' }}>
-                        ★ Maximum Pathology Finding
-                      </span>
+                  {/* Viewport Frame */}
+                  <div className="viewport-frame">
+                    {loadingUploadedSlice ? (
+                      <div className="viewport-loading-overlay">
+                        <RotateCw size={22} className="spin" color="var(--accent-primary)" />
+                        <span style={{ marginTop: 8, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                          Loading slice #{uploadedCaseSliceIndex + 1}…
+                        </span>
+                      </div>
+                    ) : (
+                      uploadedSliceDetail && (
+                        <>
+                          <img src={uploadedSliceDetail.original_image} alt="CT Slice" className="viewport-image" />
+                          <img
+                            src={maskOverlayUrl || uploadedSliceDetail.overlay_image}
+                            alt="Segmentation overlay"
+                            className="viewport-overlay-layer"
+                            style={{ opacity }}
+                          />
+                        </>
+                      )
                     )}
                   </div>
 
-                  {uploadedSliceDetail && (
-                    <div style={{ fontSize: '0.75rem', display: 'flex', gap: 12 }}>
-                      <span style={{ color: '#34D399' }}>Kidney: {uploadedSliceDetail.kidney_area_cm2} cm²</span>
-                      <span style={{ color: '#F87171' }}>Tumor: {uploadedSliceDetail.tumor_area_cm2} cm²</span>
-                      <span style={{ color: '#60A5FA' }}>Cyst: {uploadedSliceDetail.cyst_area_cm2} cm²</span>
+                  {/* Slice Control Bar */}
+                  <div className="slice-control-bar">
+                    <div className="slice-slider-row">
+                      <button
+                        className="playback-btn"
+                        onClick={() => setIsUploadedPlaying(p => !p)}
+                        title={isUploadedPlaying ? "Pause Cine Loop" : "Play Cine Loop"}
+                      >
+                        {isUploadedPlaying ? <Pause size={15} /> : <Play size={15} />}
+                      </button>
+                      <button
+                        className="playback-btn"
+                        onClick={() => setUploadedCaseSliceIndex(prev => Math.max(0, prev - 1))}
+                        disabled={uploadedCaseSliceIndex === 0}
+                        title="Previous Slice (←)"
+                      >
+                        <ChevronLeft size={16} />
+                      </button>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(0, uploadedCaseResult.slices_analyzed - 1)}
+                        value={uploadedCaseSliceIndex}
+                        onChange={e => setUploadedCaseSliceIndex(parseInt(e.target.value))}
+                      />
+                      <button
+                        className="playback-btn"
+                        onClick={() => setUploadedCaseSliceIndex(prev => Math.min(uploadedCaseResult.slices_analyzed - 1, prev + 1))}
+                        disabled={uploadedCaseSliceIndex === uploadedCaseResult.slices_analyzed - 1}
+                        title="Next Slice (→)"
+                      >
+                        <ChevronRight size={16} />
+                      </button>
+                      <div className="slice-counter">
+                        {uploadedCaseSliceIndex + 1} / {uploadedCaseResult.slices_analyzed}
+                      </div>
                     </div>
-                  )}
-                </div>
 
-                {/* 3-Column Image Display: CT | Predicted Mask | Color Overlay */}
-                {uploadedSliceDetail ? (
-                  <div className="uploaded-slices-grid">
-                    <div className="uploaded-slice-card">
-                      <img src={uploadedSliceDetail.original_image} alt="Original CT" />
-                      <span className="uploaded-slice-label">1. Grayscale Patient CT Scan</span>
+                    {/* Legend & Layer Toggles */}
+                    <div className="legend-row">
+                      <div className="legend-chips">
+                        <div
+                          className={`legend-chip ${visibleLayers.kidney ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(16, 185, 129, 0.12)', color: '#34D399', border: '1px solid rgba(16, 185, 129, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, kidney: !v.kidney }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-kidney)' }} />
+                          Kidney Parenchyma
+                        </div>
+                        <div
+                          className={`legend-chip ${visibleLayers.tumor ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#F87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, tumor: !v.tumor }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-tumor)' }} />
+                          Renal Neoplasm (Tumor)
+                        </div>
+                        <div
+                          className={`legend-chip ${visibleLayers.cyst ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(59, 130, 246, 0.12)', color: '#60A5FA', border: '1px solid rgba(59, 130, 246, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, cyst: !v.cyst }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-cyst)' }} />
+                          Renal Cyst
+                        </div>
+                      </div>
+
+                      <div className="opacity-slider-wrapper">
+                        <Sliders size={13} />
+                        <span>Opacity</span>
+                        <input
+                          type="range"
+                          min="0.2"
+                          max="1.0"
+                          step="0.05"
+                          value={opacity}
+                          onChange={e => setOpacity(parseFloat(e.target.value))}
+                          aria-label="Segmentation overlay opacity"
+                        />
+                        <output>{Math.round(opacity * 100)}%</output>
+                      </div>
                     </div>
-                    <div className="uploaded-slice-card">
-                      <img src={uploadedSliceDetail.predicted_mask} alt="AI Mask" />
-                      <span className="uploaded-slice-label">2. Residual U-Net Segmented Mask</span>
-                    </div>
-                    <div className="uploaded-slice-card">
-                      <img src={uploadedSliceDetail.overlay_image} alt="Diagnostic Overlay" />
-                      <span className="uploaded-slice-label">3. Diagnostic Color Overlay</span>
-                    </div>
                   </div>
-                ) : (
-                  <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
-                    {loadingUploadedSlice ? "Loading slice visualization..." : "Select slice to inspect"}
-                  </div>
-                )}
+                </section>
 
-                {/* Scrubber and Cine-Loop Controls */}
-                <div className="uploaded-scrubber-row">
-                  <button
-                    className="btn-icon"
-                    onClick={() => setUploadedCaseSliceIndex(prev => Math.max(0, prev - 1))}
-                    disabled={uploadedCaseSliceIndex === 0}
-                  >
-                    <ChevronLeft size={18} />
-                  </button>
-
-                  <button
-                    className="btn-icon"
-                    onClick={() => setIsUploadedPlaying(p => !p)}
-                    style={{ background: isUploadedPlaying ? 'rgba(6, 182, 212, 0.2)' : undefined }}
-                  >
-                    {isUploadedPlaying ? <Pause size={18} color="var(--accent-primary)" /> : <Play size={18} />}
-                  </button>
-
-                  <button
-                    className="btn-icon"
-                    onClick={() => setUploadedCaseSliceIndex(prev => Math.min(uploadedCaseResult.slices_analyzed - 1, prev + 1))}
-                    disabled={uploadedCaseSliceIndex === uploadedCaseResult.slices_analyzed - 1}
-                  >
-                    <ChevronRight size={18} />
-                  </button>
-
-                  <input
-                    type="range"
-                    min="0"
-                    max={uploadedCaseResult.slices_analyzed - 1}
-                    value={uploadedCaseSliceIndex}
-                    onChange={e => setUploadedCaseSliceIndex(parseInt(e.target.value))}
-                    style={{ flex: 1 }}
-                  />
-
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', minWidth: 60, textAlign: 'right' }}>
-                    {uploadedCaseSliceIndex + 1} / {uploadedCaseResult.slices_analyzed}
-                  </span>
-                </div>
-
-                {/* Quick Navigation Jump Chips */}
-                <div className="uploaded-quick-jumps">
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Quick Jump:</span>
-                  <button
-                    className={`jump-chip ${uploadedCaseSliceIndex === uploadedCaseResult.best_preview_slice ? 'active' : ''}`}
-                    onClick={() => setUploadedCaseSliceIndex(uploadedCaseResult.best_preview_slice)}
-                  >
-                    🔴 Max Pathology Slice (#{uploadedCaseResult.best_preview_slice + 1})
-                  </button>
-                  <button
-                    className="jump-chip"
-                    onClick={() => setUploadedCaseSliceIndex(Math.floor(uploadedCaseResult.slices_analyzed / 2))}
-                  >
-                    Center Slice (#{Math.floor(uploadedCaseResult.slices_analyzed / 2) + 1})
-                  </button>
-                  <button
-                    className="jump-chip"
-                    onClick={() => setUploadedCaseSliceIndex(0)}
-                  >
-                    Superior Margin (Slice #1)
-                  </button>
-                  <button
-                    className="jump-chip"
-                    onClick={() => setUploadedCaseSliceIndex(uploadedCaseResult.slices_analyzed - 1)}
-                  >
-                    Inferior Margin (Slice #{uploadedCaseResult.slices_analyzed})
-                  </button>
-                </div>
-              </div>
-
-              {/* 3D Physical Volumetrics Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                <div className="metric-tile tile-cyan">
-                  <span className="tile-label">Total Parenchyma</span>
-                  <span className="tile-value">{uploadedCaseResult.total_parenchyma_vol_cm3}</span>
-                  <span className="tile-sub">cm³ functional reserve</span>
-                </div>
-                <div className="metric-tile tile-tumor">
-                  <span className="tile-label">Renal Neoplasm</span>
-                  <span className="tile-value" style={{ color: '#F87171' }}>{uploadedCaseResult.tumor_vol_cm3}</span>
-                  <span className="tile-sub">cm³ solid tumor</span>
-                </div>
-                <div className="metric-tile tile-cyst">
-                  <span className="tile-label">Renal Cyst</span>
-                  <span className="tile-value" style={{ color: '#60A5FA' }}>{uploadedCaseResult.cyst_vol_cm3}</span>
-                  <span className="tile-sub">cm³ benign volume</span>
-                </div>
-                <div className="metric-tile tile-kidney">
-                  <span className="tile-label">Tumor Burden</span>
-                  <span className="tile-value">{uploadedCaseResult.tumor_burden_pct}%</span>
-                  <span className="tile-sub">of functional parenchyma</span>
-                </div>
-              </div>
-
-              {/* 3D PCA Morphometry & Ellipsoid Overestimate Error */}
-              <div className="glass-panel pca-card" style={{ padding: '16px' }}>
-                <div className="card-title-row">
-                  <div className="card-title">
-                    <Cpu size={16} color="var(--accent-amber)" />
-                    3D PCA Calipers & Traditional Ellipsoid Audit (Koukoutegos et al., 2024)
-                  </div>
-                </div>
-
-                <div className="pca-grid">
-                  <div className="pca-box">
-                    <div className="pca-axis-name">Length (L)</div>
-                    <div className="pca-axis-val">{uploadedCaseResult.length_cm} cm</div>
-                  </div>
-                  <div className="pca-box">
-                    <div className="pca-axis-name">Width (W)</div>
-                    <div className="pca-axis-val">{uploadedCaseResult.width_cm} cm</div>
-                  </div>
-                  <div className="pca-box">
-                    <div className="pca-axis-name">Thickness (T)</div>
-                    <div className="pca-axis-val">{uploadedCaseResult.thickness_cm} cm</div>
-                  </div>
-                </div>
-
-                <div className="citation-note" style={{ marginTop: 10 }}>
-                  <strong>Prolate Ellipsoid Volume:</strong> {uploadedCaseResult.ellipsoid_vol_cm3} cm³ | 
-                  Traditional 3-axis caliper approximation overestimates true volume by <strong>+{uploadedCaseResult.ellipsoid_error_pct}%</strong> due to complex renal hilum geometry.
-                </div>
+                {/* RIGHT: INTEGRATED SLICE ANALYSIS PANEL */}
+                <SliceAnalysisPanel
+                  selectedCaseId={uploadedCaseResult.case_id}
+                  sliceIndex={uploadedCaseSliceIndex}
+                  totalSlices={uploadedCaseResult.slices_analyzed}
+                  sliceData={uploadedSliceDetail}
+                  loadingCase={false}
+                  loadingSlice={loadingUploadedSlice}
+                />
               </div>
             </div>
           )}
 
           {/* ============================================================================== */}
-          {/* SINGLE CT SLICE UPLOAD RESULT */}
+          {/* SINGLE CT SLICE UPLOAD RESULT: MATCHES COHORT CASE EXPLORER WORKSPACE */}
           {/* ============================================================================== */}
           {singleSliceResult && (
-            <div className="glass-panel" style={{ maxWidth: 960, width: '100%', padding: '24px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <h3 style={{ color: 'var(--text-white)', margin: 0 }}>Custom Slice 2D Segmentation Result</h3>
-                  <span className="badge badge-cyan">{singleSliceResult.inference_time_ms} ms</span>
+            <div className="uploaded-case-card glass-panel">
+              {/* Header with Case Metadata & Actions */}
+              <div className="uploaded-case-header">
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <h2 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-white)', margin: 0 }}>
+                      Slice: {singleSliceResult.filename || "Uploaded Slice"}
+                    </h2>
+                    <span className="badge badge-emerald">2D Analysis</span>
+                    <span className="badge badge-cyan">{singleSliceResult.inference_time_ms} ms Latency</span>
+                  </div>
                 </div>
-                <button
-                  className="btn-secondary"
-                  onClick={() => setSingleSliceResult(null)}
-                >
-                  <RotateCw size={14} /> Analyze Another Slice
-                </button>
-              </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '14px', marginBottom: '20px' }}>
-                <div style={{ textAlign: 'center', background: 'var(--bg-deep)', padding: 10, borderRadius: 8 }}>
-                  <img src={singleSliceResult.original_image} alt="Original" style={{ width: '100%', borderRadius: 6, background: '#000' }} />
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 6, display: 'block' }}>Grayscale CT</span>
-                </div>
-                <div style={{ textAlign: 'center', background: 'var(--bg-deep)', padding: 10, borderRadius: 8 }}>
-                  <img src={singleSliceResult.predicted_mask} alt="Mask" style={{ width: '100%', borderRadius: 6, background: '#000' }} />
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 6, display: 'block' }}>AI Predicted Mask</span>
-                </div>
-                <div style={{ textAlign: 'center', background: 'var(--bg-deep)', padding: 10, borderRadius: 8 }}>
-                  <img src={singleSliceResult.overlay_image} alt="Overlay" style={{ width: '100%', borderRadius: 6, background: '#000' }} />
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 6, display: 'block' }}>Color-Coded Overlay</span>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    className="btn-secondary"
+                    style={{ padding: '5px 12px', fontSize: '0.78rem' }}
+                    onClick={() => {
+                      setSingleSliceResult(null);
+                    }}
+                  >
+                    <RotateCw size={13} /> Upload Another Scan
+                  </button>
                 </div>
               </div>
 
-              <div className="metric-grid-4">
-                <div className="metric-tile tile-kidney">
-                  <span className="tile-label">Kidney Area</span>
-                  <span className="tile-value">{singleSliceResult.kidney_area_cm2} cm²</span>
-                </div>
-                <div className="metric-tile tile-tumor">
-                  <span className="tile-label">Tumor Area</span>
-                  <span className="tile-value" style={{ color: '#F87171' }}>{singleSliceResult.tumor_area_cm2} cm²</span>
-                </div>
-                <div className="metric-tile tile-cyst">
-                  <span className="tile-label">Cyst Area</span>
-                  <span className="tile-value" style={{ color: '#60A5FA' }}>{singleSliceResult.cyst_area_cm2} cm²</span>
-                </div>
-                <div className="metric-tile tile-cyan">
-                  <span className="tile-label">Kidney Voxels</span>
-                  <span className="tile-value">{singleSliceResult.pixel_counts.kidney} px</span>
-                </div>
+              {/* Two-Column Clinical Workspace: Left Primary CT Viewer, Right Slice Prediction Summary */}
+              <div className="main-layout" style={{ maxWidth: '100%', width: '100%', padding: 0, margin: 0 }}>
+                {/* LEFT: CT VIEWER PANEL */}
+                <section className="glass-panel viewer-panel">
+                  <div className="viewer-header">
+                    <div className="viewer-study-meta">
+                      <div className="viewer-overline">AXIAL CT / 2D INSTANT PREDICTION</div>
+                      <div className="viewer-case-name">{singleSliceResult.filename || "Uploaded Slice"}</div>
+                    </div>
+                  </div>
+
+                  {/* Viewport Frame */}
+                  <div className="viewport-frame">
+                    <img src={singleSliceResult.original_image} alt="CT Slice" className="viewport-image" />
+                    <img
+                      src={maskOverlayUrl || singleSliceResult.overlay_image}
+                      alt="Segmentation overlay"
+                      className="viewport-overlay-layer"
+                      style={{ opacity }}
+                    />
+                  </div>
+
+                  {/* Slice Control Bar (Single Slice Indicator & Layer Legend) */}
+                  <div className="slice-control-bar">
+                    <div className="slice-slider-row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                        Single Axial Slice Study
+                      </span>
+                      <div className="slice-counter">1 / 1</div>
+                    </div>
+
+                    {/* Legend & Layer Toggles */}
+                    <div className="legend-row">
+                      <div className="legend-chips">
+                        <div
+                          className={`legend-chip ${visibleLayers.kidney ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(16, 185, 129, 0.12)', color: '#34D399', border: '1px solid rgba(16, 185, 129, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, kidney: !v.kidney }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-kidney)' }} />
+                          Kidney Parenchyma
+                        </div>
+                        <div
+                          className={`legend-chip ${visibleLayers.tumor ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#F87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, tumor: !v.tumor }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-tumor)' }} />
+                          Renal Neoplasm (Tumor)
+                        </div>
+                        <div
+                          className={`legend-chip ${visibleLayers.cyst ? '' : 'inactive'}`}
+                          style={{ background: 'rgba(59, 130, 246, 0.12)', color: '#60A5FA', border: '1px solid rgba(59, 130, 246, 0.3)' }}
+                          onClick={() => setVisibleLayers(v => ({ ...v, cyst: !v.cyst }))}
+                        >
+                          <div className="chip-color-box" style={{ background: 'var(--color-cyst)' }} />
+                          Renal Cyst
+                        </div>
+                      </div>
+
+                      <div className="opacity-slider-wrapper">
+                        <Sliders size={13} />
+                        <span>Opacity</span>
+                        <input
+                          type="range"
+                          min="0.2"
+                          max="1.0"
+                          step="0.05"
+                          value={opacity}
+                          onChange={e => setOpacity(parseFloat(e.target.value))}
+                          aria-label="Segmentation overlay opacity"
+                        />
+                        <output>{Math.round(opacity * 100)}%</output>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* RIGHT: INTEGRATED SLICE ANALYSIS PANEL */}
+                <SliceAnalysisPanel
+                  selectedCaseId={singleSliceResult.case_id || "single_slice"}
+                  sliceIndex={0}
+                  totalSlices={1}
+                  sliceData={singleSliceResult}
+                  loadingCase={false}
+                  loadingSlice={false}
+                />
               </div>
             </div>
           )}

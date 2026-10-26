@@ -1,0 +1,386 @@
+/* ==============================================================================
+   Integrated Slice Analysis Panel Styles
+   ============================================================================== */
+
+.slice-analysis-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  background: var(--glass-bg, #FFFFFF);
+  border: 1px solid var(--glass-border, #DCE4EC);
+  border-radius: var(--border-radius-xl, 18px);
+  box-shadow: var(--glass-shadow, 0 2px 10px rgba(15, 23, 42, 0.05));
+  gap: 14px;
+}
+
+/* HEADER */
+.sap-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--glass-border, #DCE4EC);
+}
+
+.sap-title-block {
+  flex: 1;
+  min-width: 220px;
+}
+
+.sap-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sap-title {
+  margin: 0;
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: var(--text-white, #172033);
+  letter-spacing: -0.01em;
+}
+
+.sap-slice-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--bg-surface-elevated, #F1F5F9);
+  border: 1px solid var(--glass-border, #DCE4EC);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent-primary, #2563EB);
+  font-family: var(--font-mono, monospace);
+}
+
+.sap-disclaimer {
+  margin: 3px 0 0;
+  color: var(--text-muted, #718096);
+  font-size: 0.71rem;
+  line-height: 1.35;
+}
+
+.sap-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+/* LOADING & EMPTY STATES */
+.sap-loading-state,
+.sap-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 16px;
+  color: var(--text-muted, #718096);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* CONTENT CONTAINER */
+.sap-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 1. STATUS BANNER */
+.sap-status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  background: rgba(37, 99, 235, 0.05);
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  border-radius: var(--border-radius-md, 8px);
+  padding: 9px 12px;
+}
+
+.sap-status-banner.neutral {
+  background: var(--bg-surface-elevated, #F1F5F9);
+  border-color: var(--glass-border, #DCE4EC);
+}
+
+.sap-status-icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.sap-status-body {
+  flex: 1;
+}
+
+.sap-status-headline {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-white, #172033);
+  line-height: 1.35;
+}
+
+.sap-quality-flag {
+  margin-top: 3px;
+  font-size: 0.68rem;
+  color: #A1660E;
+  font-weight: 500;
+}
+
+/* 2. STATS 2x2 GRID */
+.sap-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 9px;
+}
+
+@media (max-width: 480px) {
+  .sap-stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sap-stat-card {
+  background: #FAFCFE;
+  border: 1px solid var(--glass-border, #DCE4EC);
+  border-radius: var(--border-radius-md, 8px);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: border-color var(--transition-fast, 150ms ease);
+}
+
+.sap-stat-card:hover {
+  border-color: #B8C6D8;
+}
+
+.sap-stat-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sap-stat-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted, #718096);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sap-stat-val {
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-white, #172033);
+}
+
+.sap-stat-sub {
+  font-size: 0.66rem;
+  color: var(--text-muted, #718096);
+}
+
+/* Stat Card Highlights */
+.sap-stat-card.detected-kidney {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.04);
+}
+.sap-stat-card.detected-kidney .sap-stat-val {
+  color: #0B8B67;
+}
+
+.sap-stat-card.detected-tumor {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.04);
+}
+.sap-stat-card.detected-tumor .sap-stat-val {
+  color: #C73A3A;
+}
+
+.sap-stat-card.detected-cyst {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.04);
+}
+.sap-stat-card.detected-cyst .sap-stat-val {
+  color: #2563EB;
+}
+
+.sap-stat-regions .sap-stat-val {
+  font-family: var(--font-mono, monospace);
+  color: var(--accent-primary, #2563EB);
+}
+
+/* 3. SECTION BOX (BAR CHART & REGIONS) */
+.sap-box {
+  background: #FFFFFF;
+  border: 1px solid var(--glass-border, #DCE4EC);
+  border-radius: var(--border-radius-md, 8px);
+  padding: 12px 14px;
+}
+
+.sap-box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.sap-box-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-white, #172033);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sap-title-with-info {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sap-info-wrap {
+  display: inline-flex;
+  cursor: help;
+}
+
+.sap-box-meta {
+  font-size: 0.67rem;
+  color: var(--text-muted, #718096);
+  font-family: var(--font-mono, monospace);
+}
+
+/* HORIZONTAL BAR CHART */
+.sap-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sap-bar-row {
+  display: grid;
+  grid-template-columns: 88px 1fr 58px;
+  align-items: center;
+  gap: 10px;
+}
+
+.sap-bar-lead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sap-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.sap-class-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-primary, #243247);
+}
+
+.sap-track {
+  width: 100%;
+  height: 7px;
+  background: #EAF0F6;
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.sap-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sap-pct-val {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.71rem;
+  font-weight: 600;
+  text-align: right;
+  color: var(--text-secondary, #526176);
+}
+
+/* 4. CONNECTED REGIONS TILES */
+.sap-region-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.sap-region-tile {
+  padding: 8px 10px;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--glass-border, #DCE4EC);
+}
+
+.sap-region-tile.kidney-tile {
+  background: rgba(16, 185, 129, 0.05);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+.sap-region-tile.kidney-tile .sap-region-name {
+  color: #0B8B67;
+}
+
+.sap-region-tile.tumor-tile {
+  background: rgba(239, 68, 68, 0.05);
+  border-color: rgba(239, 68, 68, 0.25);
+}
+.sap-region-tile.tumor-tile .sap-region-name {
+  color: #C73A3A;
+}
+
+.sap-region-tile.cyst-tile {
+  background: rgba(59, 130, 246, 0.05);
+  border-color: rgba(59, 130, 246, 0.25);
+}
+.sap-region-tile.cyst-tile .sap-region-name {
+  color: #2563EB;
+}
+
+.sap-region-name {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.sap-region-count {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-white, #172033);
+}
+
+.sap-region-sub {
+  font-size: 0.63rem;
+  color: var(--text-muted, #718096);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sap-regions-explainer {
+  margin: 8px 0 0;
+  font-size: 0.68rem;
+  color: var(--text-muted, #718096);
+  line-height: 1.35;
+}

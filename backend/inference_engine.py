@@ -16,13 +16,7 @@ from backend.model_loader import load_model, get_device
 import os
 import re
 import json
-from backend.clinical_analytics import (
-    calculate_physical_volumes,
-    compute_pca_renal_axes,
-    compute_tnm_surgical_staging,
-    generate_clinical_markdown_report,
-    VOXEL_SPACING_DEFAULT
-)
+from backend.slice_summary import build_case_slice_summaries, summarize_slice_mask, write_case_slice_summary_csv
 
 DATA_ROOT = Path(os.getenv("DATA_ROOT", r"D:\archive"))
 IMAGE_DIR = DATA_ROOT / "images"
@@ -30,8 +24,26 @@ MASK_DIR  = DATA_ROOT / "masks"
 CSV_PATH  = DATA_ROOT / "dataset.csv"
 UPLOADED_CASES_DIR = Path(os.getenv("UPLOADED_CASES_DIR", "uploaded_cases")).resolve()
 UPLOADED_CASES_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_GPU_BATCH_SIZE = 16
+SLICE_SUMMARY_OUTPUT_DIR = Path(os.getenv("SLICE_SUMMARY_OUTPUT_DIR", "reports/slice_summaries"))
+CASE_BUNDLE_CACHE_DIR = Path(os.getenv("CASE_BUNDLE_CACHE_DIR", "reports/case_bundles")).resolve()
+CASE_BUNDLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# A 512x512 Residual U-Net with case-volume TTA can exceed the 6 GB GPUs used
+# by the desktop deployment. Four is a safe default; deployments may override
+# it with INFERENCE_BATCH_SIZE after benchmarking their own hardware.
+DEFAULT_GPU_BATCH_SIZE = 4
 DEFAULT_CPU_BATCH_SIZE = 4
+
+
+def _slice_summary_settings() -> Tuple[int, int]:
+    """Read report-only component settings without changing prediction masks."""
+    try:
+        minimum_size = max(1, int(os.getenv("SLICE_SUMMARY_MIN_COMPONENT_PIXELS", "1")))
+        connectivity = int(os.getenv("SLICE_SUMMARY_CONNECTIVITY", "8"))
+    except ValueError as exc:
+        raise ValueError("SLICE_SUMMARY_MIN_COMPONENT_PIXELS and SLICE_SUMMARY_CONNECTIVITY must be integers.") from exc
+    if connectivity not in (4, 8):
+        raise ValueError("SLICE_SUMMARY_CONNECTIVITY must be 4 or 8.")
+    return minimum_size, connectivity
 
 
 # Color constants normalized 0-255
@@ -143,7 +155,13 @@ def standardize_dims(image: np.ndarray, target_h: int = 512, target_w: int = 512
 
 def image_to_base64_url(pil_img: Image.Image, format: str = "PNG") -> str:
     buffered = io.BytesIO()
-    pil_img.save(buffered, format=format)
+    fmt_upper = format.upper()
+    if fmt_upper in ("JPEG", "JPG"):
+        pil_img.save(buffered, format="JPEG", quality=85, optimize=False)
+    elif fmt_upper == "PNG":
+        pil_img.save(buffered, format="PNG", compress_level=1)
+    else:
+        pil_img.save(buffered, format=format)
     encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
     return f"data:image/{format.lower()};base64,{encoded}"
 
@@ -171,52 +189,71 @@ def clean_segmentation_volume(raw_volume: np.ndarray) -> np.ndarray:
     clean = np.zeros_like(raw_volume)
     is_single_slice = (raw_volume.shape[0] == 1)
 
+    has_kidney = np.any(raw_volume == 1)
+    has_tumor = np.any(raw_volume == 2)
+    has_cyst = np.any(raw_volume == 3)
+
+    if not (has_kidney or has_tumor or has_cyst):
+        return clean
+
     # 1. Kidney: retain top 2 largest components (left and right kidneys)
     # Adapt minimum voxel thresholds if processing a single 2D slice vs full 3D series
     min_k_vox = 20 if is_single_slice else 100
     min_t_vox = 10 if is_single_slice else 25
     min_c_vox = 5 if is_single_slice else 15
 
-    kidney_voxels = (raw_volume == 1)
-    if np.any(kidney_voxels):
-        labeled_k, n_k = label(kidney_voxels)
+    if has_kidney:
+        labeled_k, n_k = label(raw_volume == 1)
         if n_k > 0:
-            sizes = [np.sum(labeled_k == i) for i in range(1, n_k + 1)]
+            counts_k = np.bincount(labeled_k.ravel(), minlength=n_k + 1)
+            sizes = counts_k[1:n_k + 1]
             top_k_indices = np.argsort(sizes)[::-1][:2]
+            keep_k = np.zeros(n_k + 1, dtype=bool)
             for idx in top_k_indices:
                 if sizes[idx] >= min_k_vox:
-                    clean[labeled_k == (idx + 1)] = 1
+                    keep_k[idx + 1] = True
+            if np.any(keep_k):
+                clean[keep_k[labeled_k]] = 1
+
+    # If no tumor and no cyst are predicted anywhere, skip all expensive 3D dilations!
+    if not (has_tumor or has_cyst):
+        return clean
 
     # 2. Anatomical containment:
     # Large renal cell carcinomas (RCC) can grow up to 8-10 cm outward (exophytic growth into retroperitoneum).
     # We use a wide envelope (25 iterations ~20 mm) for tumor to eliminate distant bowel/liver noise
     # without truncating large cancer masses, and a tighter envelope for benign intra-renal cysts.
-    if np.any(clean == 1):
-        kidney_envelope_wide = binary_dilation(clean == 1, iterations=25)
-        kidney_envelope_tight = binary_dilation(clean == 1, iterations=15)
+    clean_has_k = np.any(clean == 1)
+    if clean_has_k:
+        kidney_envelope_wide = binary_dilation(clean == 1, iterations=25) if has_tumor else None
+        kidney_envelope_tight = binary_dilation(clean == 1, iterations=15) if has_cyst else None
     else:
-        kidney_envelope_wide = np.ones_like(raw_volume, dtype=bool)
-        kidney_envelope_tight = np.ones_like(raw_volume, dtype=bool)
+        kidney_envelope_wide = np.ones_like(raw_volume, dtype=bool) if has_tumor else None
+        kidney_envelope_tight = np.ones_like(raw_volume, dtype=bool) if has_cyst else None
 
     # 3. Tumor: filtered by wide anatomical boundary and minimum cluster threshold
-    tumor_voxels = (raw_volume == 2) & kidney_envelope_wide
-    if np.any(tumor_voxels):
-        labeled_t, n_t = label(tumor_voxels)
-        if n_t > 0:
-            sizes_t = [np.sum(labeled_t == i) for i in range(1, n_t + 1)]
-            for i, sz in enumerate(sizes_t, 1):
-                if sz >= min_t_vox:
-                    clean[labeled_t == i] = 2
+    if has_tumor:
+        tumor_voxels = (raw_volume == 2) & kidney_envelope_wide
+        if np.any(tumor_voxels):
+            labeled_t, n_t = label(tumor_voxels)
+            if n_t > 0:
+                counts_t = np.bincount(labeled_t.ravel(), minlength=n_t + 1)
+                keep_t = counts_t >= min_t_vox
+                keep_t[0] = False
+                if np.any(keep_t):
+                    clean[keep_t[labeled_t]] = 2
 
     # 4. Cyst: benign fluid-attenuated cysts remain intra-parenchymal or subcapsular
-    cyst_voxels = (raw_volume == 3) & kidney_envelope_tight
-    if np.any(cyst_voxels):
-        labeled_c, n_c = label(cyst_voxels)
-        if n_c > 0:
-            sizes_c = [np.sum(labeled_c == i) for i in range(1, n_c + 1)]
-            for i, sz in enumerate(sizes_c, 1):
-                if sz >= min_c_vox:
-                    clean[labeled_c == i] = 3
+    if has_cyst:
+        cyst_voxels = (raw_volume == 3) & kidney_envelope_tight
+        if np.any(cyst_voxels):
+            labeled_c, n_c = label(cyst_voxels)
+            if n_c > 0:
+                counts_c = np.bincount(labeled_c.ravel(), minlength=n_c + 1)
+                keep_c = counts_c >= min_c_vox
+                keep_c[0] = False
+                if np.any(keep_c):
+                    clean[keep_c[labeled_c]] = 3
 
     return clean
 
@@ -224,9 +261,9 @@ def clean_segmentation_volume(raw_volume: np.ndarray) -> np.ndarray:
 def get_inference_batch_size(device: torch.device) -> int:
     """Return a validated, deployment-configurable batch size.
 
-    Sixteen is the established GPU batch size for this 512 x 512 model. Set
-    ``INFERENCE_BATCH_SIZE`` to a benchmarked value (for example, 8) when a
-    different GPU has less available VRAM.
+    Four is the safe default for this 512 x 512 model on the supported 6 GB
+    GPU. Set ``INFERENCE_BATCH_SIZE`` to a benchmarked value (for example, 8)
+    on hardware with more available VRAM.
     """
     default_size = DEFAULT_GPU_BATCH_SIZE if device.type == "cuda" else DEFAULT_CPU_BATCH_SIZE
     raw_size = os.getenv("INFERENCE_BATCH_SIZE", str(default_size))
@@ -338,7 +375,7 @@ def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = Non
     """Inference on a single uploaded slice with 16-bit/8-bit auto-detection and adaptive TTA."""
     model, device = load_model()
     if use_tta is None:
-        use_tta = (device.type == "cuda")
+        use_tta = False
     t_start = time.perf_counter()
 
     pil_raw = Image.open(io.BytesIO(image_bytes))
@@ -375,6 +412,15 @@ def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = Non
     overlay_img = create_overlay(vis_norm, pred_mask)
     overlay_b64 = image_to_base64_url(overlay_img)
 
+    min_component_pixels, connectivity = _slice_summary_settings()
+    slice_summary_data = summarize_slice_mask(
+        pred_mask,
+        "single_slice",
+        0,
+        minimum_component_pixels=min_component_pixels,
+        connectivity=connectivity,
+    )
+
     return {
         "original_image": orig_b64,
         "predicted_mask": mask_b64,
@@ -389,6 +435,7 @@ def run_single_slice_inference(image_bytes: bytes, use_tta: Optional[bool] = Non
             "cyst": px_c,
             "background": int(np.sum(pred_mask == 0))
         },
+        "slice_summary": slice_summary_data,
         "inference_time_ms": round(t_elapsed, 1),
         "tta_enabled": use_tta,
         "kidney_absence_filter": filter_stats,
@@ -399,7 +446,9 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
     """Runs 3D volume reconstruction and clinical decision support for a patient case with adaptive TTA."""
     model, device = load_model()
     if use_tta is None:
-        use_tta = (device.type == "cuda")
+        # Whole-volume TTA retains four probability tensors per batch and is
+        # too memory-intensive for common 6 GB GPUs. Clients may opt in.
+        use_tta = False
     t_start = time.perf_counter()
 
     if not CSV_PATH.exists():
@@ -448,40 +497,19 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
     kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
     clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
-    # Clinical volumetric calculations
-    vols = calculate_physical_volumes(clean_preds_3d, VOXEL_SPACING_DEFAULT)
-    pca = compute_pca_renal_axes(clean_preds_3d == 1, VOXEL_SPACING_DEFAULT)
-    staging = compute_tnm_surgical_staging(clean_preds_3d, vols, VOXEL_SPACING_DEFAULT)
+    # Report the final mask already used by the viewer and volumetric analysis.
+    # This is CPU-only connected-component analysis; it does not mutate masks or rerun inference.
+    min_component_pixels, connectivity = _slice_summary_settings()
+    slice_summary_rows = build_case_slice_summaries(
+        clean_preds_3d, [case_id] * len(slice_indices), slice_indices,
+        minimum_component_pixels=min_component_pixels, connectivity=connectivity,
+    )
+    summary_by_index = {row["slice_index"]: row for row in slice_summary_rows}
+    slice_summary_path = write_case_slice_summary_csv(
+        slice_summary_rows, SLICE_SUMMARY_OUTPUT_DIR, case_id,
+    )
 
     t_elapsed = time.perf_counter() - t_start
-
-    # Ground truth comparison if available
-    gt_comparison = None
-    if has_gt and len(gt_list) == len(slices_list):
-        gt_3d = np.stack(gt_list, axis=0)
-        gt_vols = calculate_physical_volumes(gt_3d, VOXEL_SPACING_DEFAULT)
-        gt_pca = compute_pca_renal_axes(gt_3d == 1, VOXEL_SPACING_DEFAULT)
-        gt_staging = compute_tnm_surgical_staging(gt_3d, gt_vols, VOXEL_SPACING_DEFAULT)
-
-        # 3D Dice calculation
-        def dice_3d(pred, gt, cls_idx):
-            p = (pred == cls_idx)
-            g = (gt == cls_idx)
-            intersection = np.logical_and(p, g).sum()
-            total = p.sum() + g.sum()
-            return float((2.0 * intersection) / total) if total > 0 else 1.0
-
-        gt_comparison = {
-            "gt_total_kidney_vol_cm3": gt_vols["total_parenchyma_vol_cm3"],
-            "gt_tumor_vol_cm3": gt_vols["tumor_vol_cm3"],
-            "gt_tnm_stage": gt_staging["tnm_t_stage"],
-            "gt_d_max_cm": gt_staging["d_max_cm"],
-            "dice_kidney": round(dice_3d(clean_preds_3d, gt_3d, 1), 4),
-            "dice_tumor": round(dice_3d(clean_preds_3d, gt_3d, 2), 4),
-            "dice_cyst": round(dice_3d(clean_preds_3d, gt_3d, 3), 4),
-        }
-
-    report_md = generate_clinical_markdown_report(case_id, vols, pca, staging, t_elapsed)
 
     # Pre-render all slice payloads for instant client-side inspection
     px_area_cm2 = (0.78125 * 0.78125) / 100.0
@@ -532,30 +560,18 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
                 "tumor": t_px,
                 "cyst": c_px,
                 "background": int(np.sum(pred_m == 0))
-            }
+            },
+            "slice_summary": summary_by_index[s_idx],
         })
 
     return {
         "case_id": case_id,
         "slices_analyzed": len(slices_list),
-        "right_kidney_vol_cm3": vols["right_kidney_vol_cm3"],
-        "left_kidney_vol_cm3": vols["left_kidney_vol_cm3"],
-        "total_parenchyma_vol_cm3": vols["total_parenchyma_vol_cm3"],
-        "tumor_vol_cm3": vols["tumor_vol_cm3"],
-        "cyst_vol_cm3": vols["cyst_vol_cm3"],
-        "tumor_burden_pct": vols["tumor_burden_pct"],
-        "length_cm": pca["length_cm"],
-        "width_cm": pca["width_cm"],
-        "thickness_cm": pca["thickness_cm"],
-        "ellipsoid_vol_cm3": pca["ellipsoid_vol_cm3"],
-        "ellipsoid_error_pct": pca["ellipsoid_error_pct"],
-        "tnm_stage": staging["tnm_t_stage"],
-        "surgical_recommendation": staging["surgical_recommendation"],
         "inference_time_sec": round(t_elapsed, 2),
-        "gt_comparison": gt_comparison,
-        "report_markdown": report_md,
         "tta_enabled": use_tta,
         "kidney_absence_filter": filter_stats,
+        "slice_summary": slice_summary_rows,
+        "slice_summary_csv": str(slice_summary_path.resolve()),
         "slices": slices_bundle
     }
 
@@ -568,9 +584,20 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
     """
     Returns all pre-computed/cached slices and 3D metrics for a patient case at once.
     This enables immediate, zero-latency slice flipping in the UI without per-slice model requests.
+    Uses two-tier caching: L1 (in-memory) + L2 (disk cache in CASE_BUNDLE_CACHE_DIR).
     """
     if case_id in _case_full_cache:
         return _case_full_cache[case_id]
+
+    cache_file = CASE_BUNDLE_CACHE_DIR / f"{case_id}_full.json"
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                bundle = json.load(f)
+            _case_full_cache[case_id] = bundle
+            return bundle
+        except Exception as e:
+            logger.warning("Failed to read disk cache for %s: %s", case_id, e)
 
     # 1. Check if case was uploaded
     upload_meta_path = UPLOADED_CASES_DIR / case_id / "meta.json"
@@ -583,6 +610,8 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
             s_idx = s_info["slice_index"]
             try:
                 sl = get_uploaded_case_slice(case_id, s_idx)
+                if "slice_summary" in s_info:
+                    sl["slice_summary"] = s_info["slice_summary"]
                 slices_data.append(sl)
             except Exception:
                 pass
@@ -590,42 +619,34 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
         bundle = {
             "case_id": case_id,
             "total_slices": len(slices_data),
-            "metrics_3d": {
-                "case_id": case_id,
-                "slices_analyzed": m.get("slices_analyzed", len(slices_data)),
-                "right_kidney_vol_cm3": m["vols"]["right_kidney_vol_cm3"],
-                "left_kidney_vol_cm3": m["vols"]["left_kidney_vol_cm3"],
-                "total_parenchyma_vol_cm3": m["vols"]["total_parenchyma_vol_cm3"],
-                "tumor_vol_cm3": m["vols"]["tumor_vol_cm3"],
-                "cyst_vol_cm3": m["vols"]["cyst_vol_cm3"],
-                "tumor_burden_pct": m["vols"]["tumor_burden_pct"],
-                "length_cm": m["pca"]["length_cm"],
-                "width_cm": m["pca"]["width_cm"],
-                "thickness_cm": m["pca"]["thickness_cm"],
-                "ellipsoid_vol_cm3": m["pca"]["ellipsoid_vol_cm3"],
-                "ellipsoid_error_pct": m["pca"]["ellipsoid_error_pct"],
-                "tnm_stage": m["staging"]["tnm_t_stage"],
-                "surgical_recommendation": m["staging"]["surgical_recommendation"],
-                "inference_time_sec": m.get("inference_time_sec", 1.0),
-                "report_markdown": m.get("report_markdown", "")
-            },
+            "slice_summary": m.get("slice_summary", []),
+            "slice_summary_csv": m.get("slice_summary_csv"),
             "slices": slices_data
         }
         _case_full_cache[case_id] = bundle
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(bundle, f)
+        except Exception:
+            pass
         return bundle
 
     # 2. Dataset case: batch volume inference
     res = run_patient_case_inference(case_id, use_tta=use_tta)
     slices_bundle = res.get("slices", [])
-    metrics_3d = {k: v for k, v in res.items() if k != "slices"}
-
     bundle = {
         "case_id": case_id,
         "total_slices": len(slices_bundle),
-        "metrics_3d": metrics_3d,
+        "slice_summary": res.get("slice_summary", []),
+        "slice_summary_csv": res.get("slice_summary_csv"),
         "slices": slices_bundle
     }
     _case_full_cache[case_id] = bundle
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(bundle, f)
+    except Exception as e:
+        logger.warning("Failed to write disk cache for %s: %s", case_id, e)
     return bundle
 
 
@@ -646,7 +667,9 @@ def run_uploaded_case_pipeline(
     """
     model, device = load_model()
     if use_tta is None:
-        use_tta = (device.type == "cuda")
+        # Favor reliable, low-latency whole-case prediction; TTA remains an
+        # explicit API option for users who accept the extra memory/time cost.
+        use_tta = False
     t_start = time.perf_counter()
 
     valid_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".dcm"}
@@ -708,13 +731,7 @@ def run_uploaded_case_pipeline(
     kidney_filtered_preds_3d, filter_stats = filter_prediction_slices(raw_preds_3d)
     clean_preds_3d = clean_segmentation_volume(kidney_filtered_preds_3d)
 
-    # Physical volume, PCA calipers, TNM staging
-    vols = calculate_physical_volumes(clean_preds_3d, VOXEL_SPACING_DEFAULT)
-    pca = compute_pca_renal_axes(clean_preds_3d == 1, VOXEL_SPACING_DEFAULT)
-    staging = compute_tnm_surgical_staging(clean_preds_3d, vols, VOXEL_SPACING_DEFAULT)
-
     t_elapsed = time.perf_counter() - t_start
-    report_md = generate_clinical_markdown_report(case_id, vols, pca, staging, t_elapsed)
 
     # Save to uploaded_cases directory cache for on-demand slice viewer
     case_store_dir = UPLOADED_CASES_DIR / case_id
@@ -722,6 +739,15 @@ def run_uploaded_case_pipeline(
     case_masks_dir = case_store_dir / "masks"
     case_images_dir.mkdir(parents=True, exist_ok=True)
     case_masks_dir.mkdir(parents=True, exist_ok=True)
+
+    min_component_pixels, connectivity = _slice_summary_settings()
+    upload_slice_indices = list(range(len(slices_list)))
+    slice_summary_rows = build_case_slice_summaries(
+        clean_preds_3d, [case_id] * len(upload_slice_indices), upload_slice_indices,
+        minimum_component_pixels=min_component_pixels, connectivity=connectivity,
+    )
+    summary_by_index = {row["slice_index"]: row for row in slice_summary_rows}
+    slice_summary_path = write_case_slice_summary_csv(slice_summary_rows, case_store_dir / "reports", case_id)
 
     px_area_cm2 = (0.78125 * 0.78125) / 100.0
     slices_summary = []
@@ -752,7 +778,8 @@ def run_uploaded_case_pipeline(
             "cyst_area_cm2": round(c_px * px_area_cm2, 2),
             "has_kidney": k_px > 0,
             "has_tumor": t_px > 0,
-            "has_cyst": c_px > 0
+            "has_cyst": c_px > 0,
+            "slice_summary": summary_by_index[i],
         })
 
     # Determine best preview slice
@@ -800,13 +827,11 @@ def run_uploaded_case_pipeline(
         "case_id": case_id,
         "slices_analyzed": len(slices_list),
         "best_preview_slice": best_preview_slice,
-        "vols": vols,
-        "pca": pca,
-        "staging": staging,
         "inference_time_sec": round(t_elapsed, 2),
-        "report_markdown": report_md,
         "tta_enabled": use_tta,
-        "slices": slices_summary
+        "slices": slices_summary,
+        "slice_summary": slice_summary_rows,
+        "slice_summary_csv": str(slice_summary_path.resolve()),
     }
     with open(case_store_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_data, f, indent=2)
@@ -815,25 +840,13 @@ def run_uploaded_case_pipeline(
         "case_id": case_id,
         "slices_analyzed": len(slices_list),
         "best_preview_slice": best_preview_slice,
-        "right_kidney_vol_cm3": vols["right_kidney_vol_cm3"],
-        "left_kidney_vol_cm3": vols["left_kidney_vol_cm3"],
-        "total_parenchyma_vol_cm3": vols["total_parenchyma_vol_cm3"],
-        "tumor_vol_cm3": vols["tumor_vol_cm3"],
-        "cyst_vol_cm3": vols["cyst_vol_cm3"],
-        "tumor_burden_pct": vols["tumor_burden_pct"],
-        "length_cm": pca["length_cm"],
-        "width_cm": pca["width_cm"],
-        "thickness_cm": pca["thickness_cm"],
-        "ellipsoid_vol_cm3": pca["ellipsoid_vol_cm3"],
-        "ellipsoid_error_pct": pca["ellipsoid_error_pct"],
-        "tnm_stage": staging["tnm_t_stage"],
-        "surgical_recommendation": staging["surgical_recommendation"],
         "inference_time_sec": round(t_elapsed, 2),
         "tta_enabled": use_tta,
         "kidney_absence_filter": filter_stats,
+        "slice_summary": slice_summary_rows,
+        "slice_summary_csv": str(slice_summary_path.resolve()),
         "slices": slices_summary,
         "key_preview_slices": key_previews,
-        "report_markdown": report_md
     }
 
 
@@ -865,6 +878,15 @@ def get_uploaded_case_slice(case_id: str, slice_idx: int) -> Dict[str, Any]:
     overlay_img = create_overlay(norm, mask_arr)
     overlay_b64 = image_to_base64_url(overlay_img)
 
+    min_component_pixels, connectivity = _slice_summary_settings()
+    slice_summary_data = summarize_slice_mask(
+        mask_arr,
+        case_id,
+        slice_idx,
+        minimum_component_pixels=min_component_pixels,
+        connectivity=connectivity,
+    )
+
     return {
         "case_id": case_id,
         "slice_index": slice_idx,
@@ -879,5 +901,6 @@ def get_uploaded_case_slice(case_id: str, slice_idx: int) -> Dict[str, Any]:
             "tumor": t_px,
             "cyst": c_px,
             "background": int(np.sum(mask_arr == 0))
-        }
+        },
+        "slice_summary": slice_summary_data,
     }

@@ -12,10 +12,9 @@ COPY requirements-docker.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-docker.txt
 
-# Copy backend source and artifacts
+# Copy backend source. Runtime checkpoints and reports are mounted by Docker
+# Compose, so do not bake frequently changing artifacts into the image.
 COPY backend/ ./backend/
-COPY notebookV3/checkpoints/ ./notebookV3/checkpoints/
-COPY notebookV3/reports/ ./notebookV3/reports/
 
 ENV PYTHONUNBUFFERED=1
 ENV DATA_ROOT=/data

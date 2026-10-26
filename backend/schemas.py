@@ -35,31 +35,7 @@ class SlicePredictionResponse(BaseModel):
     inference_time_ms: float
     tta_enabled: Optional[bool] = True
     kidney_absence_filter: Optional[Dict[str, int]] = None
-
-class Patient3DMetrics(BaseModel):
-    case_id: str
-    slices_analyzed: int
-    right_kidney_vol_cm3: float
-    left_kidney_vol_cm3: float
-    total_parenchyma_vol_cm3: float
-    tumor_vol_cm3: float
-    cyst_vol_cm3: float
-    tumor_burden_pct: float
-    length_cm: float
-    width_cm: float
-    thickness_cm: float
-    ellipsoid_vol_cm3: float
-    ellipsoid_error_pct: float
-    tnm_stage: str
-    surgical_recommendation: str
-    inference_time_sec: float
-    gt_comparison: Optional[Dict[str, Any]] = None
-    tta_enabled: Optional[bool] = True
-
-class ClinicalReportResponse(BaseModel):
-    case_id: str
-    markdown_content: str
-    structured_json: Dict[str, Any]
+    slice_summary: Optional[Dict[str, Any]] = None
 
 class CaseUploadSliceItem(BaseModel):
     slice_index: int
@@ -85,22 +61,8 @@ class CaseUploadResponse(BaseModel):
     case_id: str
     slices_analyzed: int
     best_preview_slice: int
-    right_kidney_vol_cm3: float
-    left_kidney_vol_cm3: float
-    total_parenchyma_vol_cm3: float
-    tumor_vol_cm3: float
-    cyst_vol_cm3: float
-    tumor_burden_pct: float
-    length_cm: float
-    width_cm: float
-    thickness_cm: float
-    ellipsoid_vol_cm3: float
-    ellipsoid_error_pct: float
-    tnm_stage: str
-    surgical_recommendation: str
     inference_time_sec: float
     tta_enabled: Optional[bool] = True
     kidney_absence_filter: Optional[Dict[str, int]] = None
     slices: List[CaseUploadSliceItem]
     key_preview_slices: Optional[List[CaseUploadPreviewSlice]] = []
-    report_markdown: str

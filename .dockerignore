@@ -11,6 +11,10 @@ archive_legacy/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+notebookV3/checkpoints/
+notebookV3/reports/
+notebookV3/figures/
+uploaded_cases/
 figures/
 reports/
 prompts.txt
