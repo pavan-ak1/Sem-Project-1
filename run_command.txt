@@ -1,75 +1,77 @@
 # ==============================================================================
-# 1. BASELINE TRAINING (train.py) & INTERACTIVE V3 NOTEBOOKS
+# 1. INTERACTIVE RESEARCH & EXPLORATION NOTEBOOKS (V3 Pipeline)
 # ==============================================================================
-# Retrain with Class-Weighted Focal + Asymmetric Tversky Loss (Fine-tuning best_unet_kits23.pth):
-.\venv\Scripts\python.exe train_tversky.py --epochs 10 --lr 1e-4 --batch-size 8
-
-# Interactive Notebooks (V3 Pipeline):
-# Open and run notebooks under `notebookV3/` directly in Jupyter / VS Code / Antigravity IDE:
+# Open and run notebooks under `notebookV3/` in Jupyter, VS Code, or Antigravity IDE:
 #   - notebookV3/01_dataset_analysis.ipynb
 #   - notebookV3/02_preprocessing_and_augmentation.ipynb
 #   - notebookV3/03_model_architecture_and_training.ipynb
 #   - notebookV3/04_volumetric_analysis_and_clinical_metrics.ipynb
+#
+# Production model weights used by the system:
+#   - notebookV3/checkpoints/best_unet_kits23.pth (Final Residual U-Net, 8.11M params)
 
 
 # ==============================================================================
-# 2. MODEL EVALUATION & TESTING (With Optional TTA)
+# 2. FULL-STACK APPLICATION & CLINICAL INTERFACE
 # ==============================================================================
-# Evaluate Best V3 Model on Test Split:
-.\venv\Scripts\python.exe evaluate.py --checkpoint notebookV3/checkpoints/best_unet_kits23.pth --split test --batch-size 16 --tta
 
-# Standard V3 Test Split Evaluation:
-.\venv\Scripts\python.exe evaluate.py --checkpoint notebookV3/checkpoints/best_unet_kits23.pth --split test --batch-size 16
+# ------------------------------------------------------------------------------
+# Option A — Decoupled Development Mode (Hot-Reloading):
+# ------------------------------------------------------------------------------
+# Terminal 1 (FastAPI Deep Learning Backend):
+.\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
 
-# Test Split with Test-Time Augmentation (TTA for +0.5% to +1.5% Dice boost):
-.\venv\Scripts\python.exe evaluate.py --split test --batch-size 16 --tta
+# Terminal 2 (React / Vite Frontend):
+npm.cmd --prefix frontend run dev
 
-# Quick evaluation on 100 test batches with 10 visual overlays:
-.\venv\Scripts\python.exe evaluate.py --split test --max-batches 100 --num-visualizations 10 --tta
-
-# Validation Split Evaluation:
-.\venv\Scripts\python.exe evaluate.py --split val --tta
-
-# Specific Patient Case Evaluations:
-.\venv\Scripts\python.exe evaluate.py --patient-case case_00110 --num-visualizations 10 --tta
-.\venv\Scripts\python.exe evaluate.py --patient-case case_00473 --num-visualizations 10 --tta
-.\venv\Scripts\python.exe evaluate.py --patient-case case_00427 --num-visualizations 10 --tta
-.\venv\Scripts\python.exe evaluate.py --patient-case case_00543 --post-process --num-visualizations 10 --tta
-
-# Calibrated Thresholding & Post-Processing (Recovers Missed Tumors & Resolves Cyst Confusion):
-.\venv\Scripts\python.exe evaluate.py --split test --batch-size 16 --tta --post-process
-.\venv\Scripts\python.exe evaluate.py --split test --calibrated --tumor-thresh 0.35 --cyst-thresh 0.28 --anatomical-containment --tta
+# -> Access Frontend UI: http://localhost:3000
+# -> Access Backend Swagger API Docs: http://localhost:8000/docs
 
 
-# ==============================================================================
-# 3. FULL-STACK WEB APPLICATION & CLINICAL INTERFACE (MENTOR DEMO)
-# ==============================================================================
-# Option A — Single-Command Full-Stack App (FastAPI serving React Dashboard):
-# .\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
-# -> Open in browser: http://localhost:8000
+# ------------------------------------------------------------------------------
+# Option B — Single-Command Unified Serving (FastAPI serving pre-built UI):
+# ------------------------------------------------------------------------------
+# Build frontend assets:
+cd frontend; npm.cmd run build; cd ..
 
-# Option B — Decoupled Frontend/Backend Dev Server:
-# Terminal 1 (FastAPI Backend):
-# .\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
-# Terminal 2 (Vite React Frontend):
-# npm.cmd --prefix frontend run dev
-# -> Open in browser: http://localhost:3000
+# Launch production server:
+.\venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
 
+# -> Access Unified Dashboard: http://localhost:8000
+
+
+# ------------------------------------------------------------------------------
 # Option C — Containerized Multi-Service Deployment (Docker Compose):
-# 1. GPU Mode (Uses NVIDIA GPU whenever available):
-#    docker compose up --build -d
-#    GPU benchmark (run inside the backend container after it is healthy):
-#    docker compose exec backend python -m backend.benchmark_inference --case-id case_00110 --tta --compare-fp32
-#    The report tests batch sizes 1, 2, 4, 8, and 16 and writes reports/inference_benchmark.json.
-#    To use a verified safe result, set INFERENCE_BATCH_SIZE=<batch-size> in docker-compose.yml and rebuild.
-#
-# 2. CPU Fallback Mode (For systems without NVIDIA GPU):
-#    docker compose -f docker-compose.cpu.yml up --build -d
-#
-# -> Open in browser: http://localhost:3000 (Frontend) or http://localhost:8000/docs (Backend Swagger API)
-# Stop containers:
-# docker compose down
+# ------------------------------------------------------------------------------
+# 1. GPU Acceleration Mode (Requires NVIDIA GPU & Container Toolkit):
+docker compose up --build -d
+
+# 2. CPU Mode (Standard multi-core CPU with bfloat16 acceleration):
+docker compose -f docker-compose.cpu.yml up --build -d
+
+# -> Access Frontend UI: http://localhost:3000
+# -> Access Backend API Docs: http://localhost:8000/docs
+
+# Check container status & health:
+docker compose ps
+docker compose logs -f backend
+
+# Benchmark inference speed inside container:
+docker compose exec backend python -m backend.benchmark_inference --case-id case_00003 --compare-fp32
+
+# Stop and clean up containers:
+# For GPU mode:
+docker compose down
+
+# For CPU mode:
+docker compose -f docker-compose.cpu.yml down
 
 
+# ==============================================================================
+# 3. UNIT TESTING & HEALTH VERIFICATION
+# ==============================================================================
+# Run backend test suite:
+.\venv\Scripts\python.exe -m pytest backend/tests
 
-
+# Verify backend health and model loading:
+curl http://localhost:8000/api/health

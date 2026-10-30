@@ -18,6 +18,8 @@ services:
       # Benchmark with backend.benchmark_inference before increasing it.
       - INFERENCE_BATCH_SIZE=4
       - SLICE_SUMMARY_OUTPUT_DIR=/app/reports/slice_summaries
+      - CASE_BUNDLE_CACHE_DIR=/app/reports/case_bundles
+      - UPLOADED_CASES_DIR=/app/uploaded_cases
     volumes:
       # Mount KiTS23 dataset into container (Read-Only)
       - D:\archive:/data:ro
@@ -25,6 +27,7 @@ services:
       - ./notebookV3/checkpoints:/app/notebookV3/checkpoints:ro
       - ./notebookV3/reports:/app/notebookV3/reports:ro
       - ./reports:/app/reports
+      - ./uploaded_cases:/app/uploaded_cases
       # Mount backend code
       - ./backend:/app/backend
     deploy:
@@ -35,12 +38,11 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 20s
+      interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 15s
+      retries: 5
+      start_period: 30s
 
   # ============================================================================
   # 2. React / Vite Frontend UI Service (Served on port 3000)

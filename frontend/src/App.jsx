@@ -187,7 +187,10 @@ export default function App() {
         if (!active) return;
         console.warn("Full case fetch fallback:", err);
         fetch(`/api/case/${selectedCaseId}/slices`, { signal: controller.signal })
-          .then(res => res.json())
+          .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+          })
           .then(data => {
             if (!active) return;
             if (data && data.slices) {
@@ -224,7 +227,10 @@ export default function App() {
     if (selectedCaseId && (!caseSlices || caseSlices.length === 0)) {
       setLoadingSlice(true);
       fetch(`/api/case/${selectedCaseId}/slice/${sliceIndex}`, { signal: controller.signal })
-        .then(res => res.json())
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
         .then(data => {
           if (!active) return;
           setSliceData(data);

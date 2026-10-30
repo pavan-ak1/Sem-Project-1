@@ -16,9 +16,10 @@ from backend.model_loader import load_model, get_device
 import os
 import re
 import json
+import threading
 from backend.slice_summary import build_case_slice_summaries, summarize_slice_mask, write_case_slice_summary_csv
 
-DATA_ROOT = Path(os.getenv("DATA_ROOT", r"D:\archive"))
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "D:/archive" if Path("D:/archive").exists() else "/data"))
 IMAGE_DIR = DATA_ROOT / "images"
 MASK_DIR  = DATA_ROOT / "masks"
 CSV_PATH  = DATA_ROOT / "dataset.csv"
@@ -295,6 +296,12 @@ def predict_tensor(
             if device.type == "cuda":
                 with torch.amp.autocast(device_type="cuda", enabled=use_amp):
                     logits = model(tensor)
+            elif device.type == "cpu" and use_amp:
+                try:
+                    with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
+                        logits = model(tensor)
+                except Exception:
+                    logits = model(tensor)
             else:
                 logits = model(tensor)
             preds = torch.argmax(logits, dim=1)
@@ -302,6 +309,18 @@ def predict_tensor(
             # 4-Fold Multi-Axis TTA: original, horizontal flip, vertical flip, and diagonal flip
             if device.type == "cuda":
                 with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                    p1 = F.softmax(model(tensor), dim=1)
+                    p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
+                    p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
+                    p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+            elif device.type == "cpu" and use_amp:
+                try:
+                    with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
+                        p1 = F.softmax(model(tensor), dim=1)
+                        p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
+                        p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
+                        p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+                except Exception:
                     p1 = F.softmax(model(tensor), dim=1)
                     p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
                     p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
@@ -578,6 +597,15 @@ def run_patient_case_inference(case_id: str, use_tta: Optional[bool] = None) -> 
 
 # In-memory global cache for instant full-case retrieval
 _case_full_cache: Dict[str, Dict[str, Any]] = {}
+_case_bundle_locks: Dict[str, threading.Lock] = {}
+_case_bundle_locks_guard = threading.Lock()
+
+
+def _get_case_lock(case_id: str) -> threading.Lock:
+    with _case_bundle_locks_guard:
+        if case_id not in _case_bundle_locks:
+            _case_bundle_locks[case_id] = threading.Lock()
+        return _case_bundle_locks[case_id]
 
 
 def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -> Dict[str, Any]:
@@ -599,55 +627,69 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
         except Exception as e:
             logger.warning("Failed to read disk cache for %s: %s", case_id, e)
 
-    # 1. Check if case was uploaded
-    upload_meta_path = UPLOADED_CASES_DIR / case_id / "meta.json"
-    if upload_meta_path.exists():
-        with open(upload_meta_path, "r", encoding="utf-8") as f:
-            m = json.load(f)
+    with _get_case_lock(case_id):
+        # Double-check in case another thread computed or loaded it while waiting
+        if case_id in _case_full_cache:
+            return _case_full_cache[case_id]
 
-        slices_data = []
-        for s_info in m.get("slices", []):
-            s_idx = s_info["slice_index"]
+        if cache_file.exists():
             try:
-                sl = get_uploaded_case_slice(case_id, s_idx)
-                if "slice_summary" in s_info:
-                    sl["slice_summary"] = s_info["slice_summary"]
-                slices_data.append(sl)
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    bundle = json.load(f)
+                _case_full_cache[case_id] = bundle
+                return bundle
             except Exception:
                 pass
 
+        # 1. Check if case was uploaded
+        upload_meta_path = UPLOADED_CASES_DIR / case_id / "meta.json"
+        if upload_meta_path.exists():
+            with open(upload_meta_path, "r", encoding="utf-8") as f:
+                m = json.load(f)
+
+            slices_data = []
+            for s_info in m.get("slices", []):
+                s_idx = s_info["slice_index"]
+                try:
+                    sl = get_uploaded_case_slice(case_id, s_idx)
+                    if "slice_summary" in s_info:
+                        sl["slice_summary"] = s_info["slice_summary"]
+                    slices_data.append(sl)
+                except Exception:
+                    pass
+
+            bundle = {
+                "case_id": case_id,
+                "total_slices": len(slices_data),
+                "slice_summary": m.get("slice_summary", []),
+                "slice_summary_csv": m.get("slice_summary_csv"),
+                "slices": slices_data
+            }
+            _case_full_cache[case_id] = bundle
+            try:
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(bundle, f)
+            except Exception:
+                pass
+            return bundle
+
+        # 2. Dataset case: batch volume inference
+        res = run_patient_case_inference(case_id, use_tta=use_tta)
+        slices_bundle = res.get("slices", [])
         bundle = {
             "case_id": case_id,
-            "total_slices": len(slices_data),
-            "slice_summary": m.get("slice_summary", []),
-            "slice_summary_csv": m.get("slice_summary_csv"),
-            "slices": slices_data
+            "total_slices": len(slices_bundle),
+            "slice_summary": res.get("slice_summary", []),
+            "slice_summary_csv": res.get("slice_summary_csv"),
+            "slices": slices_bundle
         }
         _case_full_cache[case_id] = bundle
         try:
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(bundle, f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to write disk cache for %s: %s", case_id, e)
         return bundle
-
-    # 2. Dataset case: batch volume inference
-    res = run_patient_case_inference(case_id, use_tta=use_tta)
-    slices_bundle = res.get("slices", [])
-    bundle = {
-        "case_id": case_id,
-        "total_slices": len(slices_bundle),
-        "slice_summary": res.get("slice_summary", []),
-        "slice_summary_csv": res.get("slice_summary_csv"),
-        "slices": slices_bundle
-    }
-    _case_full_cache[case_id] = bundle
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(bundle, f)
-    except Exception as e:
-        logger.warning("Failed to write disk cache for %s: %s", case_id, e)
-    return bundle
 
 
 def natural_sort_key(s: str):

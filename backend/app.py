@@ -164,6 +164,24 @@ async def list_cases():
                     split="test"
                 ))
 
+    # Also include any pre-computed bundles from CASE_BUNDLE_CACHE_DIR
+    if CASE_BUNDLE_CACHE_DIR.exists():
+        existing_ids = {r.case_id for r in results}
+        for bundle_file in sorted(CASE_BUNDLE_CACHE_DIR.glob("*_full.json")):
+            cid = bundle_file.name.replace("_full.json", "")
+            if cid not in existing_ids and not cid.startswith("test_") and not cid.startswith("uploaded_"):
+                sc = 0
+                if CSV_PATH.exists():
+                    df = pd.read_csv(CSV_PATH)
+                    sc = len(df[df["case_id"] == cid])
+                results.append(PatientCaseSummary(
+                    case_id=cid,
+                    slice_count=sc if sc > 0 else 50,
+                    has_tumor=True,
+                    has_cyst=False,
+                    split="cached"
+                ))
+
     return results
 
 
