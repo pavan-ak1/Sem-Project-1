@@ -46,6 +46,8 @@ class CaseUploadSliceItem(BaseModel):
     has_kidney: bool
     has_tumor: bool
     has_cyst: bool
+    pixel_counts: Optional[Dict[str, int]] = None
+    slice_summary: Optional[Dict[str, Any]] = None
 
 class CaseUploadPreviewSlice(BaseModel):
     slice_index: int
@@ -66,3 +68,5 @@ class CaseUploadResponse(BaseModel):
     kidney_absence_filter: Optional[Dict[str, int]] = None
     slices: List[CaseUploadSliceItem]
     key_preview_slices: Optional[List[CaseUploadPreviewSlice]] = []
+    slice_summary: Optional[List[Dict[str, Any]]] = None
+    slice_summary_csv: Optional[str] = None

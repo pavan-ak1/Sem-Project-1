@@ -821,6 +821,12 @@ def run_uploaded_case_pipeline(
             "has_kidney": k_px > 0,
             "has_tumor": t_px > 0,
             "has_cyst": c_px > 0,
+            "pixel_counts": {
+                "background": int(np.sum(clean_preds_3d[i] == 0)),
+                "kidney": k_px,
+                "tumor": t_px,
+                "cyst": c_px,
+            },
             "slice_summary": summary_by_index[i],
         })
 

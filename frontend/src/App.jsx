@@ -70,6 +70,34 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState('');
 
+  // Normalized slice collections for upload view scan-wide profile
+  const uploadedCaseSlices = useMemo(() => {
+    if (!uploadedCaseResult) return [];
+    const slices = uploadedCaseResult.slices || [];
+    const summaries = uploadedCaseResult.slice_summary || [];
+    return slices.map((s, idx) => ({
+      ...s,
+      case_id: uploadedCaseResult.case_id,
+      slice_index: s.slice_index ?? idx,
+      slice_summary: s.slice_summary || summaries[idx] || null,
+      pixel_counts: s.pixel_counts || (s.slice_summary ? {
+        background: s.slice_summary.background_pixels,
+        kidney: s.slice_summary.kidney_pixels,
+        tumor: s.slice_summary.tumor_pixels,
+        cyst: s.slice_summary.cyst_pixels,
+      } : null)
+    }));
+  }, [uploadedCaseResult]);
+
+  const singleSliceCaseSlices = useMemo(() => {
+    if (!singleSliceResult) return [];
+    return [{
+      ...singleSliceResult,
+      case_id: singleSliceResult.case_id || singleSliceResult.filename || "single_slice",
+      slice_index: 0
+    }];
+  }, [singleSliceResult]);
+
   // Modal State
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [reportMarkdown, setReportMarkdown] = useState('');
@@ -1285,7 +1313,7 @@ export default function App() {
               </div>
 
               {/* Two-Column Clinical Workspace: Left Primary CT Viewer, Right Slice Prediction Summary */}
-              <div className="main-layout" style={{ maxWidth: '100%', width: '100%', padding: 0, margin: 0 }}>
+              <div className="main-layout">
                 {/* LEFT: CT VIEWER PANEL */}
                 <section className="glass-panel viewer-panel">
                   <div className="viewer-header">
@@ -1418,6 +1446,16 @@ export default function App() {
                   loadingCase={false}
                   loadingSlice={loadingUploadedSlice}
                 />
+
+                {/* BOTTOM: UNIFIED SCAN-WIDE ANALYSIS */}
+                <ScanWideOverview
+                  selectedCaseId={uploadedCaseResult.case_id}
+                  caseSlices={uploadedCaseSlices}
+                  sliceIndex={uploadedCaseSliceIndex}
+                  setSliceIndex={setUploadedCaseSliceIndex}
+                  totalSlices={uploadedCaseResult.slices_analyzed}
+                  loadingCase={false}
+                />
               </div>
             </div>
           )}
@@ -1453,7 +1491,7 @@ export default function App() {
               </div>
 
               {/* Two-Column Clinical Workspace: Left Primary CT Viewer, Right Slice Prediction Summary */}
-              <div className="main-layout" style={{ maxWidth: '100%', width: '100%', padding: 0, margin: 0 }}>
+              <div className="main-layout">
                 {/* LEFT: CT VIEWER PANEL */}
                 <section className="glass-panel viewer-panel">
                   <div className="viewer-header">
@@ -1538,6 +1576,16 @@ export default function App() {
                   sliceData={singleSliceResult}
                   loadingCase={false}
                   loadingSlice={false}
+                />
+
+                {/* BOTTOM: UNIFIED SCAN-WIDE ANALYSIS */}
+                <ScanWideOverview
+                  selectedCaseId={singleSliceResult.case_id || singleSliceResult.filename || "single_slice"}
+                  caseSlices={singleSliceCaseSlices}
+                  sliceIndex={0}
+                  setSliceIndex={() => {}}
+                  totalSlices={1}
+                  loadingCase={false}
                 />
               </div>
             </div>

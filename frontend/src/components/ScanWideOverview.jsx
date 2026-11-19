@@ -165,6 +165,12 @@ export default function ScanWideOverview({
     };
 
     const buildPath = key => {
+      if (total === 1) {
+        const x = computeX(0);
+        const y = computeY(points[0][key]);
+        const span = Math.min(80, chartW / 4);
+        return `M ${(x - span).toFixed(1)} ${y.toFixed(1)} L ${(x + span).toFixed(1)} ${y.toFixed(1)}`;
+      }
       return points
         .map((p, i) => {
           const x = computeX(i);
@@ -176,9 +182,14 @@ export default function ScanWideOverview({
 
     const buildArea = key => {
       const lineStr = buildPath(key);
+      const baseLineY = padTop + chartH;
+      if (total === 1) {
+        const x = computeX(0);
+        const span = Math.min(80, chartW / 4);
+        return `${lineStr} L ${(x + span).toFixed(1)} ${baseLineY} L ${(x - span).toFixed(1)} ${baseLineY} Z`;
+      }
       const firstX = computeX(0);
       const lastX = computeX(total - 1);
-      const baseLineY = padTop + chartH;
       return `${lineStr} L ${lastX.toFixed(1)} ${baseLineY} L ${firstX.toFixed(1)} ${baseLineY} Z`;
     };
 
@@ -234,6 +245,59 @@ export default function ScanWideOverview({
   };
 
   const activePoint = chartData?.points[sliceIndex] || null;
+  const sliceCount = totalSlices || allRows.length;
+
+  const handleExportCsv = (e) => {
+    e.preventDefault();
+    const csvFilename = `${selectedCaseId || 'study'}_slice_summary.csv`;
+
+    fetch(`/api/case/${selectedCaseId}/slice-summary.csv`)
+      .then(res => {
+        if (!res.ok) throw new Error('Remote CSV not found');
+        return res.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = csvFilename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => {
+        if (!allRows || allRows.length === 0) return;
+        const headers = [
+          'case_id', 'slice_index', 'kidney_detected', 'tumor_detected', 'cyst_detected',
+          'background_percentage', 'kidney_percentage', 'tumor_percentage', 'cyst_percentage',
+          'kidney_connected_regions', 'tumor_connected_regions', 'cyst_connected_regions',
+          'total_connected_regions', 'summary', 'quality_flags'
+        ];
+        const escapeCsv = val => {
+          if (val === null || val === undefined) return '';
+          const str = String(val);
+          if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        };
+        const csvContent = [
+          headers.join(','),
+          ...allRows.map(r => headers.map(h => escapeCsv(r[h])).join(','))
+        ].join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = csvFilename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      });
+  };
 
   return (
     <section className="glass-panel scanwide-panel" aria-label="Unified Scan-Wide Analysis">
@@ -245,7 +309,7 @@ export default function ScanWideOverview({
             <h3 className="swo-title">Scan-Wide Class Percentage Profile</h3>
           </div>
           <p className="swo-subtitle">
-            Cross-slice pixel distribution across study {selectedCaseId} ({totalSlices || allRows.length} slices). Click any point or navigate via controls to inspect slices.
+            Cross-slice pixel distribution across study {selectedCaseId} ({sliceCount} {sliceCount === 1 ? 'slice' : 'slices'}). Click any point or navigate via controls to inspect slices.
           </p>
         </div>
 
@@ -293,15 +357,15 @@ export default function ScanWideOverview({
           )}
 
           {/* Export CSV Button */}
-          <a
+          <button
+            type="button"
             className="btn-secondary swo-export-btn"
-            href={`/api/case/${selectedCaseId}/slice-summary.csv`}
-            download={`${selectedCaseId}_slice_summary.csv`}
+            onClick={handleExportCsv}
             title="Download full slice summary CSV"
           >
             <Download size={13} />
             <span>Export CSV</span>
-          </a>
+          </button>
         </div>
       </div>
 

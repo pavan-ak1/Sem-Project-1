@@ -36,7 +36,7 @@ Evaluated on the held-out **KiTS23 (Kidney Tumor Segmentation)** benchmark test 
 | **Foreground Macro Average** | `1-3` | **75.67%** | **79.78%** | **72.48%** | — |
 
 * **Final Model Weights**: `notebookV3/checkpoints/best_unet_kits23.pth`
-* **Test Loss**: `0.0737` (Class-Weighted Focal + Asymmetric Tversky Loss)
+* **Test Loss**: `0.0737` (Composite Cross-Entropy + Multi-Class Soft Dice Loss)
 
 ---
 

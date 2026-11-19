@@ -628,7 +628,7 @@
 }
 
 .upload-container.has-result {
-  padding: 10px 24px 12px;
+  padding: 14px 28px 18px;
   gap: 0;
   height: calc(100vh - 62px);
   max-height: calc(100vh - 62px);
@@ -638,13 +638,13 @@
 .uploaded-case-card {
   width: 100% !important;
   max-width: 100% !important;
-  padding: 10px 18px !important;
+  padding: 16px 22px !important;
   margin: 0 !important;
   box-sizing: border-box;
   border-radius: var(--border-radius-xl, 16px);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   flex: 1;
   min-height: 0;
   height: 100%;
@@ -657,29 +657,32 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 10px;
-  padding-bottom: 8px;
+  gap: 12px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
 }
 
 .uploaded-case-card .main-layout {
   display: grid;
-  grid-template-columns: minmax(440px, 1.15fr) minmax(380px, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(480px, 1.25fr) minmax(360px, 1fr);
+  gap: 20px;
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0;
+  padding: 8px 4px 36px;
   flex: 1;
   min-height: 0;
   height: 100%;
-  overflow: hidden;
+  overflow-y: auto;
+  align-content: start;
 }
 
 @media (max-width: 1100px) {
   .uploaded-case-card .main-layout {
     grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 8px 4px 28px;
     overflow-y: auto;
   }
 }
@@ -687,194 +690,104 @@
 .uploaded-case-card .viewer-panel {
   display: flex;
   flex-direction: column;
-  padding: 10px 14px;
-  gap: 6px;
-  height: 100%;
+  padding: 20px;
+  background: var(--glass-bg, #FFFFFF);
+  border: 1px solid var(--glass-border, #DCE4EC);
+  border-radius: var(--border-radius-xl, 18px);
+  box-shadow: var(--glass-shadow, 0 2px 10px rgba(15, 23, 42, 0.05));
+  gap: 14px;
   min-height: 0;
-  overflow: hidden;
   box-sizing: border-box;
-  justify-content: space-between;
 }
 
 .uploaded-case-card .viewer-header {
-  padding-bottom: 4px;
   margin-bottom: 2px;
-  flex-shrink: 0;
 }
 
 .uploaded-case-card .viewer-overline {
-  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
 }
 
 .uploaded-case-card .viewer-case-name {
-  font-size: 0.95rem;
+  color: var(--text-white);
+  font-size: 1.05rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
 }
 
+/* Match viewport frame size directly to Cohort Case Explorer */
 .uploaded-case-card .viewport-frame {
-  flex: 1 1 auto;
-  min-height: 180px;
-  max-height: clamp(230px, 46vh, 380px);
-  width: auto;
+  width: 100%;
   aspect-ratio: 1 / 1;
-  align-self: center;
-  margin: 0 auto;
+  max-height: 540px;
+  background: #000000;
+  border: 1px solid var(--glass-border, #1E293B);
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
 }
 
 .uploaded-case-card .slice-control-bar {
-  padding: 4px 0 0;
-  gap: 6px;
-  flex-shrink: 0;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .uploaded-case-card .slice-slider-row {
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
 }
 
 .uploaded-case-card .playback-btn {
-  width: 30px !important;
-  height: 30px !important;
-  min-width: 30px !important;
-  min-height: 30px !important;
-  padding: 0;
+  width: 34px !important;
+  height: 34px !important;
+  min-width: 34px !important;
+  min-height: 34px !important;
+  border-radius: 50% !important;
 }
 
 .uploaded-case-card .legend-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 12px;
   flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--glass-border);
 }
 
 .uploaded-case-card .legend-chips {
-  gap: 5px;
+  gap: 6px;
 }
 
 .uploaded-case-card .legend-chip {
-  padding: 2px 7px;
-  font-size: 0.7rem;
-  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  border-radius: 6px;
 }
 
 .uploaded-case-card .opacity-slider-wrapper {
-  padding: 2px 7px;
-  font-size: 0.7rem;
-  gap: 6px;
-  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  gap: 8px;
+  border-radius: 6px;
 }
 
 .uploaded-case-card .opacity-slider-wrapper input[type="range"] {
-  width: 65px;
-}
-
-.uploaded-case-card .slice-analysis-panel {
-  padding: 10px 14px;
-  gap: 8px;
-  height: 100%;
-  min-height: 0;
-  max-height: 100%;
-  overflow-y: auto;
-  box-sizing: border-box;
-}
-
-.uploaded-case-card .slice-analysis-panel::-webkit-scrollbar {
-  width: 5px;
-}
-.uploaded-case-card .slice-analysis-panel::-webkit-scrollbar-track {
-  background: transparent;
-}
-.uploaded-case-card .slice-analysis-panel::-webkit-scrollbar-thumb {
-  background: var(--glass-border);
-  border-radius: 4px;
-}
-
-.uploaded-case-card .sap-header {
-  padding-bottom: 5px;
-  gap: 6px;
-}
-
-.uploaded-case-card .sap-title {
-  font-size: 0.88rem;
-}
-
-.uploaded-case-card .sap-disclaimer {
-  font-size: 0.65rem;
-  margin-top: 2px;
-}
-
-.uploaded-case-card .sap-status-banner {
-  padding: 5px 8px;
-  gap: 6px;
-}
-
-.uploaded-case-card .sap-status-headline {
-  font-size: 0.74rem;
-}
-
-.uploaded-case-card .sap-stats-grid {
-  gap: 6px;
-}
-
-.uploaded-case-card .sap-stat-card {
-  padding: 5px 8px;
-  gap: 1px;
-}
-
-.uploaded-case-card .sap-stat-label {
-  font-size: 0.62rem;
-}
-
-.uploaded-case-card .sap-stat-val {
-  font-size: 1.05rem;
-}
-
-.uploaded-case-card .sap-stat-sub {
-  font-size: 0.6rem;
-}
-
-.uploaded-case-card .sap-box {
-  padding: 6px 10px;
-}
-
-.uploaded-case-card .sap-box-header {
-  margin-bottom: 3px;
-}
-
-.uploaded-case-card .sap-box-title {
-  font-size: 0.7rem;
-}
-
-.uploaded-case-card .sap-bar-chart {
-  gap: 3px;
-}
-
-.uploaded-case-card .sap-bar-row {
-  margin-bottom: 2px;
-}
-
-.uploaded-case-card .sap-region-grid {
-  gap: 6px;
-}
-
-.uploaded-case-card .sap-region-tile {
-  padding: 4px 6px;
-}
-
-.uploaded-case-card .sap-region-name {
-  font-size: 0.65rem;
-}
-
-.uploaded-case-card .sap-region-count {
-  font-size: 1.05rem;
-}
-
-.uploaded-case-card .sap-region-sub {
-  font-size: 0.6rem;
-}
-
-.uploaded-case-card .sap-regions-explainer {
-  margin-top: 3px;
-  font-size: 0.62rem;
+  width: 80px;
 }
 
 .upload-mode-pill {
