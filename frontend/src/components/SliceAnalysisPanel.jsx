@@ -54,6 +54,7 @@ export default function SliceAnalysisPanel({
   const {
     percentages,
     pixelCounts,
+    areasCm2,
     totalPixels,
     kidneyDetected,
     tumorDetected,
@@ -70,6 +71,7 @@ export default function SliceAnalysisPanel({
       return {
         percentages: { background: 100, kidney: 0, tumor: 0, cyst: 0 },
         pixelCounts: { background: 0, kidney: 0, tumor: 0, cyst: 0 },
+        areasCm2: { kidney: 0, tumor: 0, cyst: 0 },
         totalPixels: 0,
         kidneyDetected: false,
         tumorDetected: false,
@@ -89,6 +91,18 @@ export default function SliceAnalysisPanel({
 
     // Dynamic pixel sum from actual slice dimensions (never hardcoding 512x512)
     const sumPixels = (px.background || 0) + (px.kidney || 0) + (px.tumor || 0) + (px.cyst || 0);
+
+    // Physical area calculation in cm2 (pixel spacing 0.78125 mm x 0.78125 mm / 100)
+    const pxAreaCm2 = 0.006103515625;
+    const kArea = sliceData?.kidney_area_cm2 != null
+      ? Number(sliceData.kidney_area_cm2)
+      : Number(((px.kidney || 0) * pxAreaCm2).toFixed(2));
+    const tArea = sliceData?.tumor_area_cm2 != null
+      ? Number(sliceData.tumor_area_cm2)
+      : Number(((px.tumor || 0) * pxAreaCm2).toFixed(2));
+    const cArea = sliceData?.cyst_area_cm2 != null
+      ? Number(sliceData.cyst_area_cm2)
+      : Number(((px.cyst || 0) * pxAreaCm2).toFixed(2));
 
     // Calculate exact percentages proportional to actual mask pixels
     const bgPct = sumPixels > 0
@@ -144,6 +158,11 @@ export default function SliceAnalysisPanel({
         kidney: Number(kPct),
         tumor: Number(tPct),
         cyst: Number(cPct)
+      },
+      areasCm2: {
+        kidney: kArea,
+        tumor: tArea,
+        cyst: cArea
       },
       pixelCounts: {
         background: px.background || 0,
@@ -375,7 +394,7 @@ export default function SliceAnalysisPanel({
               {/* Kidney */}
               <div
                 className="sap-bar-row"
-                title={`Kidney: ${pixelCounts.kidney.toLocaleString()} pixels (${percentages.kidney.toFixed(2)}%)`}
+                title={`Kidney: ${pixelCounts.kidney.toLocaleString()} pixels (${percentages.kidney.toFixed(2)}% • ${areasCm2 ? areasCm2.kidney.toFixed(2) : 0} cm²)`}
               >
                 <div className="sap-bar-lead">
                   <span className="sap-swatch" style={{ backgroundColor: CLASS_PALETTE.kidney.color }} />
@@ -398,14 +417,17 @@ export default function SliceAnalysisPanel({
                   className="sap-pct-val"
                   style={{ color: percentages.kidney > 0 ? CLASS_PALETTE.kidney.color : 'inherit' }}
                 >
-                  {percentages.kidney.toFixed(2)}%
+                  <span>{percentages.kidney.toFixed(2)}%</span>
+                  {areasCm2 && areasCm2.kidney != null && (
+                    <span className="sap-area-val">({areasCm2.kidney.toFixed(2)} cm²)</span>
+                  )}
                 </div>
               </div>
 
               {/* Tumor */}
               <div
                 className="sap-bar-row"
-                title={`Tumor: ${pixelCounts.tumor.toLocaleString()} pixels (${percentages.tumor.toFixed(2)}%)`}
+                title={`Tumor: ${pixelCounts.tumor.toLocaleString()} pixels (${percentages.tumor.toFixed(2)}% • ${areasCm2 ? areasCm2.tumor.toFixed(2) : 0} cm²)`}
               >
                 <div className="sap-bar-lead">
                   <span className="sap-swatch" style={{ backgroundColor: CLASS_PALETTE.tumor.color }} />
@@ -428,14 +450,17 @@ export default function SliceAnalysisPanel({
                   className="sap-pct-val"
                   style={{ color: percentages.tumor > 0 ? CLASS_PALETTE.tumor.color : 'inherit' }}
                 >
-                  {percentages.tumor.toFixed(2)}%
+                  <span>{percentages.tumor.toFixed(2)}%</span>
+                  {areasCm2 && areasCm2.tumor != null && (
+                    <span className="sap-area-val">({areasCm2.tumor.toFixed(2)} cm²)</span>
+                  )}
                 </div>
               </div>
 
               {/* Cyst */}
               <div
                 className="sap-bar-row"
-                title={`Cyst: ${pixelCounts.cyst.toLocaleString()} pixels (${percentages.cyst.toFixed(2)}%)`}
+                title={`Cyst: ${pixelCounts.cyst.toLocaleString()} pixels (${percentages.cyst.toFixed(2)}% • ${areasCm2 ? areasCm2.cyst.toFixed(2) : 0} cm²)`}
               >
                 <div className="sap-bar-lead">
                   <span className="sap-swatch" style={{ backgroundColor: CLASS_PALETTE.cyst.color }} />
@@ -458,7 +483,10 @@ export default function SliceAnalysisPanel({
                   className="sap-pct-val"
                   style={{ color: percentages.cyst > 0 ? CLASS_PALETTE.cyst.color : 'inherit' }}
                 >
-                  {percentages.cyst.toFixed(2)}%
+                  <span>{percentages.cyst.toFixed(2)}%</span>
+                  {areasCm2 && areasCm2.cyst != null && (
+                    <span className="sap-area-val">({areasCm2.cyst.toFixed(2)} cm²)</span>
+                  )}
                 </div>
               </div>
             </div>

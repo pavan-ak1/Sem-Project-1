@@ -32,7 +32,14 @@ from backend.schemas import (
     CaseUploadResponse,
     CaseUploadSliceItem
 )
-from backend.model_loader import load_model, get_device, is_model_loaded
+from backend.model_loader import (
+    load_model,
+    get_device,
+    is_model_loaded,
+    get_available_backend,
+    get_onnx_session,
+    get_cpu_threads,
+)
 from backend.inference_engine import (
     run_single_slice_inference,
     run_patient_case_inference,
@@ -70,10 +77,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Pre-load model weights into GPU VRAM on server boot and warm up cuDNN kernels."""
+    """Pre-load model weights on server boot and warm up execution kernels."""
     try:
         model, device = load_model()
-        print(f"[STARTUP] Residual U-Net successfully loaded on {device} (8.11M params).")
+        backend_name = get_available_backend()
+        print(f"[STARTUP] Residual U-Net successfully loaded on {device} (8.11M params, backend={backend_name}).")
         if device.type == "cuda":
             with torch.inference_mode():
                 # Warm up batch size 4 (volume batch inference)
@@ -86,15 +94,38 @@ async def startup_event():
                     _ = model(dummy_single)
             torch.cuda.synchronize()
             print("[STARTUP] GPU inference engine warmed up and cuDNN convolution kernels cached (B=1, B=4).")
+        else:
+            if backend_name == "onnx_cpu":
+                session = get_onnx_session()
+                if session is not None:
+                    dummy_b4 = np.zeros((4, 1, 512, 512), dtype=np.float32)
+                    _ = session.run(["output"], {"input": dummy_b4})
+                    dummy_b1 = np.zeros((1, 1, 512, 512), dtype=np.float32)
+                    _ = session.run(["output"], {"input": dummy_b1})
+                    print("[STARTUP] ONNX Runtime CPU inference engine warmed up (B=1, B=4).")
+            else:
+                with torch.inference_mode():
+                    dummy_b1 = torch.zeros((1, 1, 512, 512), device=device)
+                    _ = model(dummy_b1)
+                print("[STARTUP] PyTorch CPU inference engine warmed up (B=1).")
     except Exception as e:
         print(f"[STARTUP WARNING] Model initialization postponed: {e}")
 
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
-    """System health check and GPU acceleration status."""
+    """System health check, execution device verification, and backend acceleration status."""
     device = get_device()
+    backend_name = get_available_backend()
     checkpoint_p = Path("notebookV3/checkpoints/best_unet_kits23.pth").resolve()
+
+    if device.type == "cuda":
+        provider = "CUDAExecutionProvider"
+    elif backend_name == "onnx_cpu":
+        provider = "CPUExecutionProvider"
+    else:
+        provider = "PyTorch CPU"
+
     return HealthResponse(
         status="healthy",
         device=str(device),
@@ -102,7 +133,11 @@ async def health_check():
         model_loaded=is_model_loaded(),
         checkpoint_path=str(checkpoint_p),
         model_architecture="Medical 2D Residual U-Net (InstanceNorm2d + PReLU)",
-        parameters=8113718
+        parameters=8113718,
+        backend=backend_name,
+        execution_provider=provider,
+        cpu_threads=get_cpu_threads() if device.type == "cpu" else None,
+        onnx_available=(get_onnx_session() is not None) if device.type == "cpu" else False,
     )
 
 

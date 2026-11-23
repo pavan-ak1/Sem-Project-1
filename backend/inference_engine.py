@@ -10,9 +10,16 @@ import pandas as pd
 from PIL import Image
 import torch
 import torch.nn.functional as F
+import scipy.special
 from scipy.ndimage import label, binary_dilation
 
-from backend.model_loader import load_model, get_device
+from backend.model_loader import (
+    load_model,
+    get_device,
+    get_available_backend,
+    get_onnx_session,
+    get_cpu_threads,
+)
 import os
 import re
 import json
@@ -277,59 +284,113 @@ def get_inference_batch_size(device: torch.device) -> int:
 
 
 def predict_tensor(
-    model: torch.nn.Module,
-    tensor: torch.Tensor,
+    model: Any,
+    tensor: Union[torch.Tensor, np.ndarray],
     device: torch.device,
     use_tta: bool = False,
     return_numpy: bool = True,
-    use_amp: bool = True
+    use_amp: bool = True,
+    backend: Optional[str] = None
 ) -> Union[np.ndarray, torch.Tensor]:
     """
     Executes model forward pass with optional 4-Fold Test-Time Augmentation (TTA).
-    tensor: (B, 1, 512, 512) float tensor in [0.0, 1.0].
+    Supports PyTorch CUDA (when device is CUDA), ONNX Runtime CPU, and PyTorch CPU fallback.
+    tensor: (B, 1, 512, 512) float tensor or numpy array in [0.0, 1.0].
     Returns a (B, 512, 512) uint8 mask with class indices {0, 1, 2, 3}.
     ``return_numpy=False`` keeps that mask on the GPU so multi-slice callers
     avoid a CPU/GPU synchronization after every batch.
     """
+    active_backend = backend or get_available_backend()
+    if device.type == "cuda":
+        active_backend = "pytorch_cuda"
+
+    # ONNX Runtime CPU execution
+    if active_backend == "onnx_cpu":
+        session = get_onnx_session()
+        if session is not None:
+            tensor_np = tensor if isinstance(tensor, np.ndarray) else tensor.detach().cpu().numpy()
+            if tensor_np.ndim == 3:
+                tensor_np = np.expand_dims(tensor_np, axis=1)
+            tensor_np = np.ascontiguousarray(tensor_np, dtype=np.float32)
+
+            if not use_tta:
+                ort_out = session.run(["output"], {"input": tensor_np})[0]
+                preds = np.argmax(ort_out, axis=1).astype(np.uint8)
+            else:
+                b = tensor_np.shape[0]
+                x1 = tensor_np
+                x2 = np.flip(tensor_np, axis=3)
+                x3 = np.flip(tensor_np, axis=2)
+                x4 = np.flip(tensor_np, axis=(2, 3))
+                concat_in = np.ascontiguousarray(np.concatenate([x1, x2, x3, x4], axis=0), dtype=np.float32)
+                ort_out = session.run(["output"], {"input": concat_in})[0]
+
+                l1 = ort_out[:b]
+                l2 = np.flip(ort_out[b:2*b], axis=3)
+                l3 = np.flip(ort_out[2*b:3*b], axis=2)
+                l4 = np.flip(ort_out[3*b:4*b], axis=(2, 3))
+
+                p1 = scipy.special.softmax(l1, axis=1)
+                p2 = scipy.special.softmax(l2, axis=1)
+                p3 = scipy.special.softmax(l3, axis=1)
+                p4 = scipy.special.softmax(l4, axis=1)
+
+                probs_avg = 0.25 * (p1 + p2 + p3 + p4)
+                preds = np.argmax(probs_avg, axis=1).astype(np.uint8)
+
+            return preds if return_numpy else torch.from_numpy(preds)
+
+    # PyTorch Execution (CUDA or CPU fallback)
+    target_device = device
+    if hasattr(model, "parameters"):
+        try:
+            target_device = next(model.parameters()).device
+        except StopIteration:
+            target_device = device
+
+    tensor_pt = tensor if isinstance(tensor, torch.Tensor) else torch.from_numpy(tensor)
+    if tensor_pt.device != target_device:
+        tensor_pt = tensor_pt.to(target_device)
+
     with torch.inference_mode():
         if not use_tta:
-            if device.type == "cuda":
+            if target_device.type == "cuda":
                 with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-                    logits = model(tensor)
-            elif device.type == "cpu" and use_amp:
+                    logits = model(tensor_pt)
+            elif target_device.type == "cpu" and use_amp:
                 try:
                     with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
-                        logits = model(tensor)
+                        logits = model(tensor_pt)
                 except Exception:
-                    logits = model(tensor)
+                    logits = model(tensor_pt)
             else:
-                logits = model(tensor)
+                logits = model(tensor_pt)
             preds = torch.argmax(logits, dim=1)
         else:
             # 4-Fold Multi-Axis TTA: original, horizontal flip, vertical flip, and diagonal flip
-            if device.type == "cuda":
+            if target_device.type == "cuda":
                 with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-                    p1 = F.softmax(model(tensor), dim=1)
-                    p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
-                    p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
-                    p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
-            elif device.type == "cpu" and use_amp:
+                    p1 = F.softmax(model(tensor_pt), dim=1)
+                    p2 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[3])), dim=1), dims=[3])
+                    p3 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2])), dim=1), dims=[2])
+                    p4 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2, 3])), dim=1), dims=[2, 3])
+            elif target_device.type == "cpu" and use_amp:
                 try:
                     with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
-                        p1 = F.softmax(model(tensor), dim=1)
-                        p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
-                        p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
-                        p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+                        p1 = F.softmax(model(tensor_pt), dim=1)
+                        p2 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[3])), dim=1), dims=[3])
+                        p3 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2])), dim=1), dims=[2])
+                        p4 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2, 3])), dim=1), dims=[2, 3])
                 except Exception:
-                    p1 = F.softmax(model(tensor), dim=1)
-                    p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
-                    p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
-                    p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+                    p1 = F.softmax(model(tensor_pt), dim=1)
+                    p2 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[3])), dim=1), dims=[3])
+                    p3 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2])), dim=1), dims=[2])
+                    p4 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2, 3])), dim=1), dims=[2, 3])
             else:
-                p1 = F.softmax(model(tensor), dim=1)
-                p2 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[3])), dim=1), dims=[3])
-                p3 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2])), dim=1), dims=[2])
-                p4 = torch.flip(F.softmax(model(torch.flip(tensor, dims=[2, 3])), dim=1), dims=[2, 3])
+                p1 = F.softmax(model(tensor_pt), dim=1)
+                p2 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[3])), dim=1), dims=[3])
+                p3 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2])), dim=1), dims=[2])
+                p4 = torch.flip(F.softmax(model(torch.flip(tensor_pt, dims=[2, 3])), dim=1), dims=[2, 3])
 
             probs_avg = 0.25 * (p1 + p2 + p3 + p4)
             preds = torch.argmax(probs_avg, dim=1)
@@ -339,19 +400,48 @@ def predict_tensor(
 
 
 def predict_volume_batched(
-    model: torch.nn.Module,
+    model: Any,
     volume: np.ndarray,
     device: torch.device,
     use_tta: bool = False,
     batch_size: Optional[int] = None,
     use_amp: bool = True,
-    timing: Optional[Dict[str, float]] = None
+    timing: Optional[Dict[str, float]] = None,
+    backend: Optional[str] = None
 ) -> np.ndarray:
-    """Predict an ordered (D, H, W) volume without per-batch GPU syncs."""
+    """Predict an ordered (D, H, W) volume with device-optimized inference path."""
     if volume.ndim != 3:
         raise ValueError(f"Expected a (D, H, W) CT volume, got shape {volume.shape}.")
 
     effective_batch_size = batch_size or get_inference_batch_size(device)
+    active_backend = backend or get_available_backend()
+    if device.type == "cuda":
+        active_backend = "pytorch_cuda"
+
+    # ONNX Runtime CPU optimized execution: directly processes NumPy slices without GPU syncs
+    if active_backend == "onnx_cpu":
+        session = get_onnx_session()
+        if session is not None:
+            predictions_list: List[np.ndarray] = []
+            total_model_time = 0.0
+            for start in range(0, len(volume), effective_batch_size):
+                batch_np = np.ascontiguousarray(volume[start:start + effective_batch_size, np.newaxis, :, :], dtype=np.float32)
+                t_start = time.perf_counter()
+                batch_pred = predict_tensor(
+                    model, batch_np, device, use_tta=use_tta,
+                    return_numpy=True, use_amp=False, backend="onnx_cpu"
+                )
+                total_model_time += (time.perf_counter() - t_start)
+                predictions_list.append(batch_pred)
+
+            if timing is not None:
+                timing["model_only_seconds"] = total_model_time
+
+            if not predictions_list:
+                return np.empty((0, *volume.shape[1:]), dtype=np.uint8)
+            return np.concatenate(predictions_list, axis=0)
+
+    # PyTorch execution (CUDA deferred transfer pipeline or CPU fallback)
     prediction_batches: List[torch.Tensor] = []
     cuda_events = []
 
@@ -372,7 +462,8 @@ def predict_volume_batched(
             prediction_batches.append(
                 predict_tensor(
                     model, batch_tensor, device, use_tta=use_tta,
-                    return_numpy=False, use_amp=use_amp
+                    return_numpy=False, use_amp=use_amp,
+                    backend="pytorch_cuda" if device.type == "cuda" else "pytorch_cpu"
                 )
             )
             if device.type == "cuda" and timing is not None:
@@ -608,6 +699,52 @@ def _get_case_lock(case_id: str) -> threading.Lock:
         return _case_bundle_locks[case_id]
 
 
+def _ensure_bundle_ground_truth(bundle: Dict[str, Any], case_id: str) -> Dict[str, Any]:
+    """Ensures each slice in the bundle has ground_truth_overlay and ground_truth_mask if mask exists on disk."""
+    slices = bundle.get("slices", [])
+    if not slices:
+        return bundle
+    if not any(s.get("ground_truth_overlay") is None for s in slices):
+        return bundle
+
+    modified = False
+    for s in slices:
+        fname = s.get("filename")
+        if not fname:
+            s_idx = s.get("slice_index", 0)
+            fname = f"{case_id}_slice_{s_idx:03d}.png"
+            s["filename"] = fname
+            modified = True
+        if s.get("ground_truth_overlay") is None:
+            mask_p = MASK_DIR / fname
+            img_p = IMAGE_DIR / fname
+            if mask_p.exists() and img_p.exists():
+                try:
+                    raw_img = Image.open(img_p)
+                    img_arr = np.array(raw_img, dtype=np.float32)
+                    img_std = standardize_dims(img_arr, 512, 512)
+                    if img_std.max() > 255.0 or raw_img.mode in ["I;16", "I", "F"]:
+                        norm = img_std / 65535.0
+                    else:
+                        norm = (img_std - img_std.min()) / max(1e-4, img_std.max() - img_std.min())
+                    gt_raw = Image.open(mask_p)
+                    gt_arr = standardize_dims(np.array(gt_raw, dtype=np.uint8), 512, 512)
+                    gt_overlay_img = create_overlay(norm, gt_arr).convert("RGB")
+                    s["ground_truth_overlay"] = image_to_base64_url(gt_overlay_img, format="JPEG")
+                    s["ground_truth_mask"] = image_to_base64_url(Image.fromarray(gt_arr * 80).convert("L"), format="PNG")
+                    modified = True
+                except Exception as e:
+                    logger.debug("GT overlay backfill skipped for %s: %s", fname, e)
+    if modified:
+        cache_file = CASE_BUNDLE_CACHE_DIR / f"{case_id}_full.json"
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(bundle, f)
+        except Exception:
+            pass
+    return bundle
+
+
 def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -> Dict[str, Any]:
     """
     Returns all pre-computed/cached slices and 3D metrics for a patient case at once.
@@ -622,6 +759,7 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
                 bundle = json.load(f)
+            bundle = _ensure_bundle_ground_truth(bundle, case_id)
             _case_full_cache[case_id] = bundle
             return bundle
         except Exception as e:
@@ -636,6 +774,7 @@ def get_patient_case_full_bundle(case_id: str, use_tta: Optional[bool] = None) -
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     bundle = json.load(f)
+                bundle = _ensure_bundle_ground_truth(bundle, case_id)
                 _case_full_cache[case_id] = bundle
                 return bundle
             except Exception:

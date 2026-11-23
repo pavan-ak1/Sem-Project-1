@@ -53,6 +53,24 @@ export default function ScanWideOverview({
         ? (px.cyst / totalPx) * 100
         : (raw.cyst_percentage ?? 0);
 
+      // Physical area calculation in cm2 (pixel spacing 0.78125 mm x 0.78125 mm / 100)
+      const pxAreaCm2 = 0.006103515625;
+      const kArea = slice?.kidney_area_cm2 != null
+        ? Number(slice.kidney_area_cm2)
+        : (raw.kidney_area_cm2 != null
+          ? Number(raw.kidney_area_cm2)
+          : Number(((px.kidney || 0) * pxAreaCm2).toFixed(2)));
+      const tArea = slice?.tumor_area_cm2 != null
+        ? Number(slice.tumor_area_cm2)
+        : (raw.tumor_area_cm2 != null
+          ? Number(raw.tumor_area_cm2)
+          : Number(((px.tumor || 0) * pxAreaCm2).toFixed(2)));
+      const cArea = slice?.cyst_area_cm2 != null
+        ? Number(slice.cyst_area_cm2)
+        : (raw.cyst_area_cm2 != null
+          ? Number(raw.cyst_area_cm2)
+          : Number(((px.cyst || 0) * pxAreaCm2).toFixed(2)));
+
       const kDet = raw.kidney_detected ?? (px.kidney > 0);
       const tDet = raw.tumor_detected ?? (px.tumor > 0);
       const cDet = raw.cyst_detected ?? (px.cyst > 0);
@@ -92,6 +110,9 @@ export default function ScanWideOverview({
         kidney_percentage: Number(kPct),
         tumor_percentage: Number(tPct),
         cyst_percentage: Number(cPct),
+        kidney_area_cm2: kArea,
+        tumor_area_cm2: tArea,
+        cyst_area_cm2: cArea,
         kidney_connected_regions: Number(kReg),
         tumor_connected_regions: Number(tReg),
         cyst_connected_regions: Number(cReg),
@@ -125,6 +146,9 @@ export default function ScanWideOverview({
       kidney: r.kidney_percentage || 0,
       tumor: r.tumor_percentage || 0,
       cyst: r.cyst_percentage || 0,
+      kidney_area_cm2: r.kidney_area_cm2 || 0,
+      tumor_area_cm2: r.tumor_area_cm2 || 0,
+      cyst_area_cm2: r.cyst_area_cm2 || 0,
       summary: r
     }));
 
@@ -630,15 +654,24 @@ export default function ScanWideOverview({
                 <div className="swo-tooltip-head">Slice #{hoveredPoint.index}</div>
                 <div className="swo-tooltip-stat" style={{ color: CLASS_COLORS.kidney }}>
                   <span>Kidney:</span>
-                  <strong>{hoveredPoint.kidney.toFixed(2)}%</strong>
+                  <strong>
+                    {hoveredPoint.kidney.toFixed(2)}%
+                    {hoveredPoint.kidney_area_cm2 > 0 && ` (${hoveredPoint.kidney_area_cm2.toFixed(2)} cm²)`}
+                  </strong>
                 </div>
                 <div className="swo-tooltip-stat" style={{ color: CLASS_COLORS.tumor }}>
                   <span>Tumor:</span>
-                  <strong>{hoveredPoint.tumor.toFixed(2)}%</strong>
+                  <strong>
+                    {hoveredPoint.tumor.toFixed(2)}%
+                    {hoveredPoint.tumor_area_cm2 > 0 && ` (${hoveredPoint.tumor_area_cm2.toFixed(2)} cm²)`}
+                  </strong>
                 </div>
                 <div className="swo-tooltip-stat" style={{ color: CLASS_COLORS.cyst }}>
                   <span>Cyst:</span>
-                  <strong>{hoveredPoint.cyst.toFixed(2)}%</strong>
+                  <strong>
+                    {hoveredPoint.cyst.toFixed(2)}%
+                    {hoveredPoint.cyst_area_cm2 > 0 && ` (${hoveredPoint.cyst_area_cm2.toFixed(2)} cm²)`}
+                  </strong>
                 </div>
                 <div className="swo-tooltip-hint">Click point to jump</div>
               </div>

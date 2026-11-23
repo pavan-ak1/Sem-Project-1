@@ -268,9 +268,9 @@
 
 .sap-bar-row {
   display: grid;
-  grid-template-columns: 88px 1fr 58px;
+  grid-template-columns: 78px 1fr max-content;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .sap-bar-lead {
@@ -308,11 +308,22 @@
 }
 
 .sap-pct-val {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  white-space: nowrap;
   font-family: var(--font-mono, monospace);
   font-size: 0.71rem;
   font-weight: 600;
   text-align: right;
   color: var(--text-secondary, #526176);
+}
+
+.sap-area-val {
+  font-size: 0.67rem;
+  font-weight: 500;
+  opacity: 0.85;
 }
 
 /* 4. CONNECTED REGIONS TILES */

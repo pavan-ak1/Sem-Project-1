@@ -9,6 +9,10 @@ class HealthResponse(BaseModel):
     checkpoint_path: str
     model_architecture: str
     parameters: int
+    backend: Optional[str] = "pytorch"
+    execution_provider: Optional[str] = None
+    cpu_threads: Optional[int] = None
+    onnx_available: Optional[bool] = False
 
 class PatientCaseSummary(BaseModel):
     case_id: str

@@ -302,7 +302,7 @@ export default function App() {
     }
 
     const maskSource = viewMode === 'gt_overlay'
-      ? (activeTargetSlice.ground_truth_mask || activeTargetSlice.predicted_mask)
+      ? activeTargetSlice.ground_truth_mask
       : activeTargetSlice.predicted_mask;
     if (!maskSource) {
       setMaskOverlayUrl(null);
@@ -980,11 +980,18 @@ export default function App() {
                   <div className="split-pane">
                     <span className="split-pane-label">EXPERT GROUND TRUTH</span>
                     {sliceData && (
-                      <img
-                        src={sliceData.ground_truth_overlay || sliceData.original_image}
-                        alt="Ground Truth"
-                        className="viewport-image"
-                      />
+                      <>
+                        <img
+                          src={sliceData.ground_truth_overlay || sliceData.original_image}
+                          alt="Ground Truth"
+                          className="viewport-image"
+                        />
+                        {!sliceData.ground_truth_overlay && !sliceData.ground_truth_mask && (
+                          <div style={{ position: 'absolute', top: 12, left: 12, background: 'rgba(30,41,59,0.85)', color: '#94A3B8', padding: '4px 8px', borderRadius: 4, fontSize: '0.72rem', fontWeight: 600, border: '1px solid rgba(255,255,255,0.1)' }}>
+                            No GT Annotation
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -996,14 +1003,22 @@ export default function App() {
                     ) : (
                       <>
                         <img src={sliceData.original_image} alt="CT Slice" className="viewport-image" />
-                        <img
-                          src={maskOverlayUrl || (viewMode === 'gt_overlay'
-                            ? (sliceData.ground_truth_overlay || sliceData.overlay_image)
-                            : sliceData.overlay_image)}
-                          alt="Segmentation overlay"
-                          className="viewport-overlay-layer"
-                          style={{ opacity }}
-                        />
+                        {((viewMode === 'gt_overlay' && (maskOverlayUrl || sliceData.ground_truth_overlay)) ||
+                          (viewMode !== 'gt_overlay' && (maskOverlayUrl || sliceData.overlay_image))) && (
+                          <img
+                            src={maskOverlayUrl || (viewMode === 'gt_overlay'
+                              ? sliceData.ground_truth_overlay
+                              : sliceData.overlay_image)}
+                            alt="Segmentation overlay"
+                            className="viewport-overlay-layer"
+                            style={{ opacity }}
+                          />
+                        )}
+                        {viewMode === 'gt_overlay' && !sliceData.ground_truth_overlay && !sliceData.ground_truth_mask && (
+                          <div style={{ position: 'absolute', top: 12, left: 12, background: 'rgba(30,41,59,0.85)', color: '#94A3B8', padding: '4px 8px', borderRadius: 4, fontSize: '0.72rem', fontWeight: 600, border: '1px solid rgba(255,255,255,0.1)' }}>
+                            No Expert Ground Truth Available for this Slice
+                          </div>
+                        )}
                       </>
                     )
                   )}
